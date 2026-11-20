@@ -43,6 +43,12 @@ type AirPortVAP struct {
 	// does (measured). False on the radio of the mesh uplink, which the uplink
 	// alone tunes.
 	Tune bool
+	// Spec is the channel as ifconfig takes it when Tune is set: "6" on
+	// 2.4 GHz (that radio stays at 20 MHz whatever is asked), and with the
+	// width on 5 GHz: "44:vht/80", "44:ht/40", "44:ht/20". The width is the
+	// radio's, set with the channel; hostapd's allow_ht40/allow_vht80 change
+	// nothing (all measured).
+	Spec string
 	// Head is the hostapd config up to and including ifparent=; Tail the rest.
 	// The unit's own sku= and region= lines go between them, and only the
 	// device knows them (apSeedFile).
@@ -57,7 +63,9 @@ func (v AirPortVAP) Config(sku, region string) string {
 // String is the log line: no passphrase in it.
 func (v AirPortVAP) String() string {
 	ch := "auto channel"
-	if v.Channel > 0 {
+	if v.Spec != "" {
+		ch = "channel " + v.Spec
+	} else if v.Channel > 0 {
 		ch = fmt.Sprintf("channel %d", v.Channel)
 	} else if v.ChannelOf != "" {
 		ch = "channel of " + v.ChannelOf
@@ -147,7 +155,11 @@ func AirPortVAPs(w translate.Wanted, uplink5 int) ([]AirPortVAP, []string) {
 		if !hasVAP[r.Name] {
 			continue
 		}
-		if r.Width != 0 && !(r.Band == "2g" && r.Width == 20) {
+		// The width goes with the channel on a 5 GHz radio the daemon tunes
+		// (Spec). Not applied: 2.4 GHz above 20 MHz, 160 MHz, and a radio
+		// whose channel is the mesh uplink's or automatic.
+		tuned := r.Band == "5g" && uplink5 == 0 && r.Channel > 0
+		if r.Width != 0 && !(r.Band == "2g" && r.Width == 20) && !(tuned && r.Width <= 80) {
 			width = append(width, fmt.Sprintf("%s %d MHz", r.Name, r.Width))
 		}
 		if r.TxPower > 0 {
@@ -158,7 +170,7 @@ func AirPortVAPs(w translate.Wanted, uplink5 int) ([]AirPortVAP, []string) {
 		}
 	}
 	if len(width) > 0 {
-		notes = append(notes, fmt.Sprintf("channel width not applied (%s): the radio keeps its own (with a mesh uplink, the uplink's)", strings.Join(width, ", ")))
+		notes = append(notes, fmt.Sprintf("channel width not applied (%s): 2.4 GHz stays at 20 MHz, 5 GHz does up to 80 MHz and takes the mesh uplink's width while there is one or the channel is automatic", strings.Join(width, ", ")))
 	}
 	if len(power) > 0 {
 		notes = append(notes, fmt.Sprintf("transmit power not applied (%s): hostapd's tx_power has no effect here", strings.Join(power, ", ")))
@@ -198,6 +210,20 @@ func airPortVAP(suffix, parent string, r translate.WantedRadio, l translate.Want
 		ch = uplink5
 	}
 	tune := ch > 0 && !(g5 && uplink5 > 0)
+	spec := ""
+	if tune {
+		spec = fmt.Sprint(ch)
+		if g5 {
+			switch {
+			case r.Width == 20:
+				spec += ":ht/20"
+			case r.Width == 40:
+				spec += ":ht/40"
+			default: // 80, more than this radio does, or not said
+				spec += ":vht/80"
+			}
+		}
+	}
 	name := "wlan" + suffix
 
 	var h strings.Builder
@@ -256,7 +282,7 @@ func airPortVAP(suffix, parent string, r translate.WantedRadio, l translate.Want
 	if ch > 0 {
 		w("channel", fmt.Sprint(ch))
 	}
-	return AirPortVAP{Name: name, Parent: parent, SSID: l.SSID, Security: l.Security, Channel: ch, ChannelOf: follow, Tune: tune, Head: h.String(), Tail: t.String()}
+	return AirPortVAP{Name: name, Parent: parent, SSID: l.SSID, Security: l.Security, Channel: ch, ChannelOf: follow, Tune: tune, Spec: spec, Head: h.String(), Tail: t.String()}
 }
 
 // UplinkChannel is the channel of the mesh uplink (the client VAP) on the radio
@@ -392,8 +418,9 @@ running() {
 ok() {
 	[ "$(cat $D/$1.new)" = "$(cat $D/$1.want 2>/dev/null)" ] && alive $1 && running $1
 }
-# start VAP RADIO CHANNEL FIRST. CHANNEL is a number (tune the radio: hostapd's
-# channel= does not move it, ifconfig on the first VAP of an idle radio does),
+# start VAP RADIO CHANNEL FIRST. CHANNEL is a channel as ifconfig takes it, "6"
+# or "44:vht/80" (tune the radio: hostapd's channel= and width keys do not move
+# it, ifconfig on the first VAP of an idle radio does),
 # "auto" (the first VAP chooses, the others get the channel it is on) or "-"
 # (the config has the channel of the mesh uplink, which alone tunes the radio).
 start() {
@@ -429,7 +456,8 @@ start() {
 radio() {
 	r=$1; pat=$2; ch=$3; shift 3
 	dirty=0
-	case $ch in auto|-) ;; *) [ "$(chan $r)" = "$ch" ] || dirty=1;; esac
+	case $ch in auto|-) ;; *) [ "$(chan $r)" = "${ch%%:*}" ] || dirty=1;; esac
+	[ "$(cat $D/$r.chan 2>/dev/null)" = "$ch" ] || dirty=1 # a width alone can change
 	for v in "$@"; do ok $v || dirty=1; done
 	have=
 	for v in $(ifconfig -l); do
@@ -444,6 +472,7 @@ radio() {
 		rm -f $D/$v.want $D/$v.conf
 		case " $* " in *" $v "*) ;; *) rm -f $D/$v.new; echo "$v removed";; esac
 	done
+	echo "$ch" > $D/$r.chan
 	for v in "$@"; do start $v $r $ch $1; done
 }
 `
@@ -472,7 +501,7 @@ func AirPortApplyScript(vaps []AirPortVAP) string {
 			if names == "" { // the radio's first VAP says how its channel is set
 				switch {
 				case v.Tune:
-					ch = fmt.Sprint(v.Channel)
+					ch = v.Spec
 				case v.Channel == 0:
 					ch = "auto"
 				}

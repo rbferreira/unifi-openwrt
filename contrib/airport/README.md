@@ -223,7 +223,7 @@ on 2.4 GHz (`bwl1`), `wlan20`..`wlan27` on 5 GHz (`bwl0`), configs and logs in
 | WPA3 and WPA2/WPA3 (the firmware's hostapd is 0.6.5, no SAE), WPA-Enterprise | the WLAN is left off, never downgraded |
 | 2.4 GHz channel | applied; "auto" keeps the channel the radio is on |
 | 5 GHz channel | the mesh uplink's while there is one, else the console's |
-| Channel width | not applied. On 5 GHz with a mesh uplink the radio keeps the width the uplink negotiated: hostapd's `allow_vht80=0` and `allow_ht40=0` changed nothing there (measured). Not explored without an uplink or on 2.4 GHz |
+| Channel width | 5 GHz with a wired uplink and a fixed channel: 20, 40 and 80 MHz applied. Behind a mesh uplink the radio keeps the width the uplink negotiated. 2.4 GHz stays at 20 MHz whatever is asked (measured) |
 | Transmit power | not applied: hostapd's `tx_power` showed no effect |
 | Guest networks, WLANs on a VLAN | left off (they would need a bridge of their own) |
 | Client isolation, MAC filter (including clients locked to another AP), PMF, 802.11r/k/v, band steering, rate limits, schedules, device logins | not applied |
@@ -232,8 +232,10 @@ A WLAN left off, and an ignored width, power, isolation, MAC filter or required 
 logged as a `note:` at each apply. Measured on the unit, and the reason for how the applier
 works:
 
-- hostapd's `channel=` does not move the radio. `ifconfig VAP channel N` on the first VAP
-  of an idle radio does, and the other VAPs follow the radio.
+- hostapd's `channel=`, `allow_ht40` and `allow_vht80` do not move the radio. `ifconfig VAP
+  channel N` on the first VAP of an idle radio does, with the width in the same argument on
+  5 GHz (`44:vht/80`, `44:ht/40`, `44:ht/20`; without it the radio came up at 40 MHz), and the
+  other VAPs follow the radio. On 2.4 GHz `6:ht/40` is accepted and the radio stays at 20 MHz.
 - The VAPs of one radio are not independent: restarting one left another down with its
   hostapd still running. So when anything changes on a radio, all its WLANs start again
   (about 3 s); the other radio and the uplink are not touched.
@@ -285,10 +287,13 @@ in the console with the same signal and rates the base station reports. With `-a
 WLANs on 2.4 GHz and one on 5 GHz brought up from the configuration on flash at boot; a
 client authenticating with WPA2 and getting an address on a WLAN rendered from scratch; the
 2.4 GHz channel changed from the console (to 11, to 1, back to auto), each applied within
-seconds, the 5 GHz WLAN and the uplink untouched.
+seconds, the 5 GHz WLAN and the uplink untouched. With the uplink taken away by hand and
+the daemon's copy of the configuration edited (the controller was out of reach that way): the
+5 GHz radio put on channel 44 at 40, 20 and 80 MHz, a width-only change included; then the
+uplink coming back by itself with the WLANs behind it.
 
-Not tested: a cable on the WAN port (the wired-uplink branch of `up.sh`, and with it a 5 GHz
-channel set from the console); the parent changing channel; an open WLAN, a hidden one and
+Not tested: a cable on the WAN port (the wired-uplink branch of `up.sh`); an automatic
+5 GHz channel without an uplink; the parent changing channel; an open WLAN, a hidden one and
 more than two WLANs on a radio outside the unit tests; any other AirPort model; a parent that
 is not a UniFi AP.
 

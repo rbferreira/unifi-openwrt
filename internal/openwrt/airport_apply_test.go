@@ -733,7 +733,7 @@ func TestAirPortScriptRadioCallsListTheirVAPs(t *testing.T) {
 		want24, want5 apRadioCall
 	}{
 		{"fixed channels, no uplink", 6, 44, 2, 2, 0,
-			rc("bwl1", "wlan1[0-7]", "6", "wlan10 wlan11"), rc("bwl0", "wlan2[0-7]", "44", "wlan20 wlan21")},
+			rc("bwl1", "wlan1[0-7]", "6", "wlan10 wlan11"), rc("bwl0", "wlan2[0-7]", "44:vht/80", "wlan20 wlan21")},
 		{"5 GHz with an uplink: not tuned", 6, 44, 2, 1, 40,
 			rc("bwl1", "wlan1[0-7]", "6", "wlan10 wlan11"), rc("bwl0", "wlan2[0-7]", "-", "wlan20")},
 		{"5 GHz auto with an uplink: not tuned", 0, 0, 1, 2, 40,
@@ -745,7 +745,7 @@ func TestAirPortScriptRadioCallsListTheirVAPs(t *testing.T) {
 		{"2.4 GHz only", 11, 0, 1, 0, 0,
 			rc("bwl1", "wlan1[0-7]", "11", "wlan10"), rc("bwl0", "wlan2[0-7]", "-", "")},
 		{"5 GHz only", 0, 100, 0, 1, 0,
-			rc("bwl1", "wlan1[0-7]", "-", ""), rc("bwl0", "wlan2[0-7]", "100", "wlan20")},
+			rc("bwl1", "wlan1[0-7]", "-", ""), rc("bwl0", "wlan2[0-7]", "100:vht/80", "wlan20")},
 		{"no VAPs", 6, 44, 0, 0, 0,
 			rc("bwl1", "wlan1[0-7]", "-", ""), rc("bwl0", "wlan2[0-7]", "-", "")},
 	}
@@ -783,7 +783,7 @@ func TestAirPortScriptTunesTheRadio(t *testing.T) {
 	}
 	vaps, _ = AirPortVAPs(w, 0) // wired: the controller's 5 GHz channel counts
 	calls = apRadioCalls(t, AirPortApplyScript(vaps))
-	if len(calls) != 2 || calls[0].channel != "6" || calls[1].channel != "44" {
+	if len(calls) != 2 || calls[0].channel != "6" || calls[1].channel != "44:vht/80" {
 		t.Errorf("without an uplink: %+v", calls)
 	}
 	// the tuning lives in start: ifconfig VAP channel N, for a number only
@@ -988,7 +988,7 @@ destroy)
 	exit 0;;
 channel)
 	p=$(cat $S/vap/$v 2>/dev/null) || exit 1
-	echo $2 > $S/chan/$p
+	echo ${2%%:*} > $S/chan/$p # the device reports the channel number; the width is apart
 	echo "channel $p $2" >> $S/log
 	exit 0;;
 esac
@@ -1638,5 +1638,51 @@ func TestAirPortAutoChannelFollowsTheFirstVAP(t *testing.T) {
 	}
 	if err := checkAirPortVAPs([]AirPortVAP{{Name: "wlan11", Parent: "bwl1", ChannelOf: "wlan9"}}); err == nil {
 		t.Error("following the uplink VAP was accepted")
+	}
+}
+
+// The width is the radio's and goes with the channel (ifconfig VAP channel
+// N:vht/80): only on a 5 GHz radio the daemon tunes. 2.4 GHz stays at 20 MHz.
+func TestAirPortWidthGoesWithTheChannel(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		band           string
+		channel, width int
+		uplink5        int
+		spec           string
+		wantNote       bool
+	}{
+		{"5 GHz 80", "5g", 44, 80, 0, "44:vht/80", false},
+		{"5 GHz 40", "5g", 44, 40, 0, "44:ht/40", false},
+		{"5 GHz 20", "5g", 44, 20, 0, "44:ht/20", false},
+		{"5 GHz width not said", "5g", 44, 0, 0, "44:vht/80", false},
+		{"5 GHz 160 is more than the radio does", "5g", 44, 160, 0, "44:vht/80", true},
+		{"5 GHz behind a mesh uplink", "5g", 44, 40, 36, "", true},
+		{"5 GHz automatic channel", "5g", 0, 40, 0, "", true},
+		{"2.4 GHz 20", "2g", 6, 20, 0, "6", false},
+		{"2.4 GHz 40", "2g", 6, 40, 0, "6", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := translate.Wanted{
+				Radios: []translate.WantedRadio{{Name: "wifi0", Band: tc.band, Channel: tc.channel, Width: tc.width}},
+				WLANs:  []translate.WantedWLAN{{N: "1", Radio: "wifi0", SSID: "Example Net", Security: "none"}},
+			}
+			vaps, notes := AirPortVAPs(w, tc.uplink5)
+			if len(vaps) != 1 {
+				t.Fatalf("%d VAPs, want 1", len(vaps))
+			}
+			if vaps[0].Spec != tc.spec {
+				t.Errorf("Spec = %q, want %q", vaps[0].Spec, tc.spec)
+			}
+			noted := false
+			for _, n := range notes {
+				if strings.Contains(n, "channel width not applied") {
+					noted = true
+				}
+			}
+			if noted != tc.wantNote {
+				t.Errorf("width note = %v, want %v: %q", noted, tc.wantNote, notes)
+			}
+		})
 	}
 }
