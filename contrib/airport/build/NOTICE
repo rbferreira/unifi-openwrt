@@ -1,0 +1,5 @@
+compat/ and the build recipe are adapted from TDSOJohn/airport-express-tools
+(https://github.com/TDSOJohn/airport-express-tools, MIT License), which did this work for
+the AirPort Express A1392 (NetBSD 4.0, MIPS). Changed here for the A1470: compat/net/if.h
+(struct if_msghdr is 160 bytes on this kernel) and the ARM EABI toolchain flags.
+compat/libc/setjmp_softfloat.S from the original is not needed on ARM and was left out.

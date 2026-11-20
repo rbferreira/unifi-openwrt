@@ -1,0 +1,2 @@
+# /mnt/Flash/rc.local - sourced by /etc/rc.d/local at every boot. Never exit or block here.
+( sleep 45; /bin/date > /mnt/Memory/rclocal.ran; exec /bin/sh /mnt/Flash/mesh/up.sh ) > /dev/null 2>&1 < /dev/null &
