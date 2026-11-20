@@ -36,7 +36,7 @@ type Target struct {
 	KeyFile    string // private key (the daemon's own)
 	KnownHosts string // known_hosts file with the AP's host key
 	// Platform: "" = OpenWrt; PlatformAirPort = an Apple AirPort base station
-	// over its debug SSH login (read-only, see airport.go).
+	// over its debug SSH login (see airport.go and airport_apply.go).
 	Platform string
 	// Password: log in with this password instead of the key (the AirPort's
 	// root password is its admin password; it has no authorized_keys).
@@ -104,7 +104,7 @@ func (cl *Client) Run(cmd string) ([]byte, error) {
 }
 
 // ErrAirPort is returned for anything but reading an AirPort base station.
-var ErrAirPort = errors.New("not supported on an AirPort base station (read-only)")
+var ErrAirPort = errors.New("not supported on an AirPort base station")
 
 func (cl *Client) run(cmd string) ([]byte, error) {
 	if cl.t.Addr == "local" {

@@ -13,9 +13,10 @@ import (
 )
 
 // Apple AirPort base stations (NetBSD-based 7.x firmware) reached over the
-// debug SSH login. Read-only: the daemon reports the base station to the
-// controller (radios, WLANs, clients, uplink) but applies nothing to it; its
-// Wi-Fi stays configured over ACP (AirPort Utility, airportctl).
+// debug SSH login. The daemon reports the base station to the controller
+// (radios, WLANs, clients, uplink); with -apply it also runs the controller's
+// WLANs on it (airport_apply.go). Nothing else is applied: Run and RunStdin
+// refuse this platform, so no command written for OpenWrt reaches it.
 //
 // Measured on an AirPort Time Capsule A1470 (802.11ac), firmware 7.9.1:
 // NetBSD 6.0 evbarm, two Broadcom BCM4360 (bwl0 = 5 GHz, bwl1 = 2.4 GHz) with
@@ -40,6 +41,7 @@ echo "=== fdb"; brconfig bridge0
 echo "=== phy"; /usr/bin/acp rpc acpd.system.show
 echo "=== netstat"; netstat -ibn
 echo "=== netpkts"; netstat -in
+for r in bwl1 bwl0; do echo "=== radio $r"; ifconfig $r 2>/dev/null; done
 for i in $(ifconfig -l); do
   case $i in wlan*) ;; *) continue;; esac
   echo "=== iface $i"; ifconfig $i
@@ -258,6 +260,14 @@ func ParseAirPort(out []byte, now time.Time) (*Snapshot, error) {
 		}
 		radios[i].VAPs = append(radios[i].VAPs, r)
 	}
+	// Both radios, 2.4 GHz first, with or without a VAP: the controller names
+	// them by position, and one that vanished would shift the other's name.
+	for _, phy := range []string{"bwl1", "bwl0"} {
+		if _, seen := idx[phy]; !seen {
+			idx[phy] = len(radios)
+			radios = append(radios, airportIdleRadio(phy, string(secs.get("radio "+phy))))
+		}
+	}
 	// AP VAPs before the client VAP, as on OpenWrt (phyN-ap0 sorts before
 	// phyN-sta0): the controller takes a radio's width from its first VAP row,
 	// and the uplink row carries none.
@@ -270,10 +280,11 @@ func ParseAirPort(out []byte, now time.Time) (*Snapshot, error) {
 	return s, nil
 }
 
-func parseAirPortRadio(iface string, secs *secMap) (Radio, bool) {
-	text := string(secs.get("iface " + iface))
+// airportIfRadio reads the ssid/channel line and txpower of an ifconfig text
+// into a Radio (band, phy and width from the frequency and mode).
+func airportIfRadio(iface, text string) (Radio, bool) {
 	m := apIfRE.FindStringSubmatch(text)
-	if m == nil || !strings.Contains(text, "RUNNING") {
+	if m == nil {
 		return Radio{}, false
 	}
 	freq := int(atoi(m[3]))
@@ -293,6 +304,31 @@ func parseAirPortRadio(iface string, secs *secMap) (Radio, bool) {
 		p, _ := strconv.ParseFloat(t[1], 64)
 		r.TxPower = int(p)
 		r.TxMax = r.TxPower
+	}
+	return r, true
+}
+
+// airportIdleRadio is a radio with no AP VAP on it (bwl1 = 2.4 GHz, bwl0 =
+// 5 GHz), from `ifconfig bwlN`: its channel and width when it shows them.
+func airportIdleRadio(phy, text string) Radio {
+	r, _ := airportIfRadio("", text)
+	r.Phy, r.Section, r.Band, r.VHT = phy, phy, "na", true
+	if phy == "bwl1" {
+		r.Band, r.VHT = "ng", false
+	}
+	if r.Width == 0 {
+		r.Width = 20
+	}
+	r.HWName, r.NSS = "Broadcom BCM4360", 3
+	r.SSID, r.BSSID, r.Iface = "", "", ""
+	return r
+}
+
+func parseAirPortRadio(iface string, secs *secMap) (Radio, bool) {
+	text := string(secs.get("iface " + iface))
+	r, ok := airportIfRadio(iface, text)
+	if !ok || !strings.Contains(text, "RUNNING") {
+		return Radio{}, false
 	}
 	switch {
 	case strings.Contains(text, "hostap"):
@@ -371,7 +407,7 @@ func normMAC(m string) string {
 	return strings.Join(p, ":")
 }
 
-// IsAirPort reports whether the AP is an AirPort base station (read-only).
+// IsAirPort reports whether the AP is an AirPort base station.
 func (cl *Client) IsAirPort() bool { return cl.t.Platform == PlatformAirPort }
 
 // airportLED maps a UniFi LED state onto the base station's one status LED

@@ -6,15 +6,16 @@ the UniFi console through `uow -ap-platform airport`. This directory is the kit 
 runbook to repeat it on another unit.
 
 It is a different thing from the rest of this project. An AirPort does not run OpenWrt: the
-daemon runs on the base station itself, built with a patched Go toolchain ([go/](go/README.md)),
-and is **read-only** there. The console shows the device; it does not configure it.
+daemon runs on the base station itself, built with a patched Go toolchain ([go/](go/README.md)).
+With `-apply` the console configures its WLANs ([what it configures](#what-the-console-configures));
+everything else an OpenWrt AP gets from this project is not applied there.
 
 ## What you get
 
 | | |
 |---|---|
 | Uplink | 5 GHz client on the parent UniFi AP's mesh backhaul SSID (`vwire-…`), bridged at layer 2: hosts behind the AirPort keep their own MAC addresses |
-| WLANs | one SSID on 2.4 GHz (the firmware's own hostapd) and the same SSID on 5 GHz (a second hostapd on the uplink's radio) |
+| WLANs | the ones the console assigns to the AP, up to 8 per band, open or WPA2 personal: one hostapd each, started by the daemon |
 | LAN ports | bridged to the uplink |
 | In the console | adopted as a UAP-AC-Pro (`U7PG2`): radios, WLANs, clients with signal and rates, packet, byte, retry and error counters, the wireless uplink and its parent, ports, CPU and memory; Restart works; the LED follows the UniFi state |
 | Depends on | nothing but the base station: no second host |
@@ -111,10 +112,12 @@ Three things, then a reboot. With `airportctl` (it refuses writes on this model 
 1. **Bridge mode**: `airportctl mode sharing bridge --untested`. In router mode the unit runs
    a DHCP server on its LAN bridge, and bridging the uplink into that would leak it onto the
    network. `up.sh` refuses to start the uplink while `dhcpd` runs.
-2. **5 GHz radio off** in the `WiFi` blob (`raSt = 3` on the radio whose `raCh` is above 14),
-   so the firmware leaves `bwl0` alone.
-3. **2.4 GHz radio as an AP** with the SSID and passphrase to serve (`raSt = 0`, then
-   `wifi.set_ssid` and `wifi.secure(radio, 'wpa2', passphrase)`).
+2. **Both radios off** in the `WiFi` blob (`raSt = 3` on each), so the firmware runs no
+   hostapd and leaves `bwl0` and `bwl1` to the kit.
+3. Before that, while the firmware still runs a WLAN of its own (it does after a factory
+   reset), **save the unit's regulatory ids**: the `sku=` and `region=` lines of
+   `/etc/hostap_wlan0.conf` go into `/mnt/Flash/mesh/hostap.seed`. `up.sh` does it by itself
+   when it first runs with that file still there. Without the seed the daemon applies nothing.
 
 In bridge mode the unit takes its address by DHCP on `bridge0` and no longer answers at
 `10.0.1.1`; over the cable it is still reachable at its IPv6 link-local address.
@@ -149,18 +152,31 @@ erased tail of `flash1` (from sector 144), leaving the factory image and the run
 alone, and `up.sh` unpacks it into the RAM disk at every boot. Checked after writing: a
 full read of both banks differed from the read before only in the sectors written.
 
-The daemon's state directory is in RAM as well. Only `state.json` and the adoption SSH keys
-are copied to `/mnt/Flash/mesh/state` when they change: the configuration history the
-daemon keeps would fill the flash in time. At boot `cfgversion` is reset so the controller
-sends the configuration again.
+The daemon's state directory is in RAM as well. `state.json`, the adoption SSH keys and the
+controller's last configuration (`system_cfg.txt`, with the WLAN passphrases, mode 600) are
+copied to `/mnt/Flash/mesh/state` when they change: the configuration history the daemon
+keeps would fill the flash in time. With the configuration on flash the WLANs come up at
+boot before the controller is reached.
 
 Reboot. `up.sh` logs to `/mnt/Memory/mesh.log`:
 
 ```
 up.sh start
 uplink associated and in bridge0
-5 GHz AP on channel 40, in the bridge
 uow started (pid 151)
+```
+
+and the daemon to `/mnt/Memory/uow.log`:
+
+```
+PLAN (applying): 3 VAP(s)
+  vap wlan10 on bwl1: ssid "…", psk2, auto channel
+  vap wlan11 on bwl1: ssid "…", psk2, channel of wlan10
+  vap wlan20 on bwl0: ssid "…", psk2, channel 40
+  airport: wlan10 started
+  airport: wlan11 started
+  airport: wlan20 started
+after apply: 3 of 3 wanted VAP(s) running
 ```
 
 ### 5. Adopt
@@ -174,13 +190,12 @@ base station on port 2222, where the daemon answers the adoption.
 2. Unpacks the daemon from `flash1` into the RAM disk and checks its size.
 3. With no link on the WAN port for 20 s: creates a client VAP on `bwl0`, starts
    `wpa_supplicant`, waits for the association, adds the VAP to `bridge0`.
-4. Starts a 5 GHz AP on the same radio, from the firmware's 2.4 GHz hostapd config, on the
-   uplink's channel.
-5. Every 5 s: a cable with link on the WAN port removes the wireless uplink and the 5 GHz AP
-   (a wired uplink and a wireless one together are a loop); an uplink that is not associated
-   for 60 s is torn down and tried again; a parent that changed channel restarts the 5 GHz AP
-   on the new one; the daemon is started once the bridge has an address and restarted if it
-   dies.
+4. Every 5 s: a cable with link on the WAN port removes the wireless uplink (a wired uplink
+   and a wireless one together are a loop); an uplink that is not associated for 60 s is torn
+   down and tried again; the daemon is started once the bridge has an address and restarted
+   if it dies. Whenever the uplink is created again or has changed channel, the 5 GHz WLANs
+   are taken down first (they share its radio); the daemon notices within a minute and
+   starts them again on the uplink's channel.
 
 The sequence that brings the client VAP up, for doing it by hand:
 
@@ -193,6 +208,38 @@ ifconfig wlan9 up; ifconfig wlan9 down
 ./wpa_supplicant -t -D bsd -i wlan9 -c wpa.conf > wpa.log 2>&1 &
 sleep 3; kill -CONT $A
 ```
+
+## What the console configures
+
+With `-apply` (which `up.sh` passes) the daemon owns the AP side of both radios. For every
+WLAN the console assigns to the AP it runs one hostapd on a VAP of its own: `wlan10`..`wlan17`
+on 2.4 GHz (`bwl1`), `wlan20`..`wlan27` on 5 GHz (`bwl0`), configs and logs in
+`/mnt/Memory/uowap`. It never touches the uplink VAP or anything outside those names.
+
+| From the console | On the base station |
+|---|---|
+| WLANs per band, SSID, hidden SSID, enable/disable | applied |
+| Open and WPA2 personal | applied |
+| WPA3 and WPA2/WPA3 (the firmware's hostapd is 0.6.5, no SAE), WPA-Enterprise | the WLAN is left off, never downgraded |
+| 2.4 GHz channel | applied; "auto" keeps the channel the radio is on |
+| 5 GHz channel | the mesh uplink's while there is one, else the console's |
+| Channel width, transmit power | not applied: the driver ignores hostapd's keys for them |
+| Guest networks, WLANs on a VLAN | left off (they would need a bridge of their own) |
+| Client isolation, MAC filter (including clients locked to another AP), PMF, 802.11r/k/v, band steering, rate limits, schedules, device logins | not applied |
+
+A WLAN left off, and an ignored width, power, isolation, MAC filter or required PMF, are
+logged as a `note:` at each apply. Measured on the unit, and the reason for how the applier
+works:
+
+- hostapd's `channel=` does not move the radio. `ifconfig VAP channel N` on the first VAP
+  of an idle radio does, and the other VAPs follow the radio.
+- The VAPs of one radio are not independent: restarting one left another down with its
+  hostapd still running. So when anything changes on a radio, all its WLANs start again
+  (about 3 s); the other radio and the uplink are not touched.
+- A VAP is destroyed and created again on every change: restarted on the same VAP, an open
+  network kept the WPA2 state of the one before it.
+- There is no timed rollback as on OpenWrt: nothing the applier does can cut the daemon
+  off from the controller.
 
 ## Rules
 
@@ -209,8 +256,8 @@ sleep 3; kill -CONT $A
   not at each change.
 - **Never run `wl … chanim_stats`.** It panics the kernel on both radios. Once the unit rebooted
   and came back on its own; the second time it did not come back by itself.
-- The console does not configure the base station. SSID, key and channel are changed over
-  ACP and take a reboot.
+- Leave both radios off in the stored configuration. A WLAN of the firmware's own on a radio
+  the daemon manages is one more VAP outside its control.
 
 ## What does not work
 
@@ -221,8 +268,8 @@ sleep 3; kill -CONT $A
 | Channel utilization | `chanim_stats` panics the kernel; `cca_get_stats`, `itfr_get_stats`, `pktq_stats` and `rate_histo` are not supported by this driver build |
 | Temperatures and fan in the console | `envstat` reads four board sensors and the fan, but for an AP the controller keeps only `has_temperature` / `has_fan` and drops the values |
 | Per-client retry counters | `wl sta_info` on this driver has none, so the experience score only sees the PHY rate. Retries and errors are reported per radio, from `wl counters` |
-| A second SSID (IoT, guest) | the `WiFi` blob has a `vaps` list per radio; not explored |
-| A separate MAC for the 5 GHz AP | `wlanaddr` is ignored: the AP's BSSID is the client VAP's MAC. It works that way |
+| A VAP's MAC address | `wlanaddr` and `wlanbssid` are ignored: the driver numbers the BSSIDs itself, one per VAP |
+| Automatic channel selection | with `acs=1` the radio stayed on the channel it was on |
 | `wl dwds_config enable sta <bssid>` | not needed, and after it (together with a test bridge) the link stopped passing traffic until the supplicant was restarted |
 | `ifconfig wlanN inet A.B.C.D netmask …` | `SIOCAIFADDR: Invalid argument`; the firmware uses the `alias` form |
 | `tcpdump` on a wlan VAP | shows received frames only |
@@ -233,10 +280,16 @@ Tested on one A1470: several reboots with the kit, each coming back on its own, 
 the daemon on the base station and no other host involved; a wired client and Wi-Fi clients on both
 bands, each with a ping in both directions and a download; a wired host on the LAN learning
 the real MAC of a client behind the base station; adoption; a phone on the real SSID showing
-in the console with the same signal and rates the base station reports.
+in the console with the same signal and rates the base station reports. With `-apply`: two
+WLANs on 2.4 GHz and one on 5 GHz brought up from the configuration on flash at boot; a
+client authenticating with WPA2 and getting an address on a WLAN rendered from scratch; the
+2.4 GHz channel changed from the console (to 11, to 1, back to auto), each applied within
+seconds, the 5 GHz WLAN and the uplink untouched.
 
-Not tested: a cable on the WAN port (the wired-uplink branch of `up.sh`); the parent changing
-channel; any other AirPort model; a parent that is not a UniFi AP.
+Not tested: a cable on the WAN port (the wired-uplink branch of `up.sh`, and with it a 5 GHz
+channel set from the console); the parent changing channel; an open WLAN, a hidden one and
+more than two WLANs on a radio outside the unit tests; any other AirPort model; a parent that
+is not a UniFi AP.
 
 ## Undo
 

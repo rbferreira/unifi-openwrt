@@ -57,7 +57,7 @@ func main() {
 	apUser := flag.String("ap-user", "root", "ssh user on the AP")
 	apKey := flag.String("ap-key", "ap_ed25519", "ssh key for the AP")
 	apKH := flag.String("ap-known-hosts", "ap_known_hosts", "known_hosts with the AP's key")
-	apPlatform := flag.String("ap-platform", "", "what -ap is: empty = OpenWrt; \"airport\" = an Apple AirPort base station over its debug SSH login (read-only: reported to the controller, nothing applied)")
+	apPlatform := flag.String("ap-platform", "", "what -ap is: empty = OpenWrt; \"airport\" = an Apple AirPort base station over its debug SSH login (with -apply only its WLANs are configured: one hostapd per WLAN)")
 	apPwFile := flag.String("ap-password-file", "", "log in to -ap with the password in this file instead of -ap-key (AirPort: the admin password)")
 	hostname := flag.String("hostname", "OpenWrt", "hostname reported to the controller")
 	wifiCaps := flag.Int("wifi-caps", 0, "UNIFI_WIFI_CAP bitmap to claim (131072 = WPA3); only what the AP can do")
@@ -345,6 +345,9 @@ func main() {
 			lastBan = time.Time{} // a wifi reload drops hostapd's bans
 			scans.rrmSoon()       // ... and its neighbour lists
 		}
+		if ap != nil && ap.IsAirPort() {
+			airportKeep(ap)
+		}
 		if ap != nil {
 			ledUpdate(ap, x)
 			scans.background(ap)
@@ -594,6 +597,12 @@ func localIPToward(informURL string) (string, error) {
 // cancelled only if the radios come back, the controller can still be
 // reached (a daemon on the AP) and the console stays healthy.
 func syncAP(ap *openwrt.Client, cfgPath string, apply bool, api *unifiapi.Client, base unifiapi.Health, informURL string) {
+	if ap.IsAirPort() {
+		// no uci here, and none of the other syncs (users, guest, steering,
+		// limits, mesh, SNMP, schedules) has an AirPort version
+		syncAirPort(ap, cfgPath, apply)
+		return
+	}
 	syncUsers(ap, cfgPath, apply)
 	defer syncGuest(ap, cfgPath, apply)
 	defer syncSteering(ap, cfgPath, apply)
@@ -699,6 +708,112 @@ func syncAP(ap *openwrt.Client, cfgPath string, apply bool, api *unifiapi.Client
 	}
 }
 
+// airportCfgPath and airportApply: what syncAirPort last ran with, to run it
+// again when the base station comes back from a reboot (waitForAP).
+var (
+	airportCfgPath string
+	airportApply   bool
+	// what the last apply asked for, and when it was last looked at (airportKeep)
+	airportWanted  []string
+	airportUplink5 int
+	airportChecked time.Time
+)
+
+// airportKeep applies again when the unit no longer runs what the last apply
+// asked for: its boot script takes the 5 GHz VAPs down around a change of the
+// mesh uplink (they share the radio), the uplink can move to another channel,
+// and a hostapd can die. Looked at once a minute.
+func airportKeep(ap *openwrt.Client) {
+	if !airportApply || airportCfgPath == "" || time.Since(airportChecked) < time.Minute {
+		return
+	}
+	airportChecked = time.Now()
+	snap, err := ap.Collect()
+	if err != nil {
+		return
+	}
+	why := ""
+	if c := snap.UplinkChannel("na"); c != airportUplink5 {
+		why = fmt.Sprintf("the 5 GHz uplink went from channel %d to %d", airportUplink5, c)
+	}
+	for _, v := range airportWanted {
+		if snap.APVAP(v) == nil {
+			why = v + " is not running"
+			break
+		}
+	}
+	if why == "" {
+		return
+	}
+	log.Printf("airport: %s: applying again", why)
+	syncAirPort(ap, airportCfgPath, true)
+}
+
+// syncAirPort gives an AirPort base station the controller's Wi-Fi: one hostapd
+// per WLAN per radio (openwrt.AirPortVAPs), applied with -apply and only logged
+// otherwise. There is no timed rollback: the VAPs never touch the uplink or the
+// bridge's other members, so a bad Wi-Fi config cannot cut the daemon off.
+func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
+	airportCfgPath, airportApply = cfgPath, apply
+	cfg, err := os.ReadFile(cfgPath)
+	if err != nil {
+		log.Printf("plan: %v", err)
+		return
+	}
+	snap, err := ap.Collect()
+	if err != nil {
+		log.Printf("plan: reading the AP: %v", err)
+		return
+	}
+	w := translate.Wifi(translate.ParseCfg(string(cfg)), snap.RadioNames())
+	uplink5 := snap.UplinkChannel("na")
+	vaps, notes := openwrt.AirPortVAPs(w, uplink5)
+	mode := "log-only, not applied"
+	if apply {
+		mode = "applying"
+	}
+	log.Printf("PLAN (%s): %d VAP(s)", mode, len(vaps))
+	for _, v := range vaps {
+		log.Printf("  vap %s", v)
+	}
+	for _, n := range append(w.Notes, notes...) {
+		log.Printf("  note: %s", n)
+	}
+	if !apply {
+		return
+	}
+	airportWanted, airportUplink5, airportChecked = nil, uplink5, time.Now()
+	for _, v := range vaps {
+		airportWanted = append(airportWanted, v.Name)
+	}
+	lines, err := ap.ApplyAirPort(vaps)
+	for _, l := range lines {
+		log.Printf("  airport: %s", l)
+	}
+	if err != nil {
+		log.Printf("APPLY FAILED: %v", err)
+		return
+	}
+	snap, err = ap.Collect()
+	if err != nil {
+		log.Printf("after apply: reading the AP: %v", err)
+		return
+	}
+	up := 0
+	var down []string
+	for _, v := range vaps {
+		if snap.APVAP(v.Name) != nil {
+			up++
+		} else {
+			down = append(down, v.Name)
+		}
+	}
+	log.Printf("after apply: %d of %d wanted VAP(s) running", up, len(vaps))
+	if len(down) > 0 {
+		log.Printf("  not running: %v", down)
+	}
+}
+
 func plan(ap *openwrt.Client, cfgPath string) (translate.Result, error) {
 	cfg, err := os.ReadFile(cfgPath)
 	if err != nil {
@@ -785,6 +900,13 @@ func waitForAP(ap *openwrt.Client, x *device.Session) {
 			log.Printf("AP back after reboot (uptime %ds)", s.Uptime)
 			x.Boot = time.Now().Add(-time.Duration(s.Uptime) * time.Second)
 			ledUpdate(ap, x)
+			if ap.IsAirPort() {
+				// the VAPs and their files were in RAM: bring them back
+				if airportCfgPath != "" {
+					syncAirPort(ap, airportCfgPath, airportApply)
+				}
+				return
+			}
 			if guestCfgPath != "" {
 				syncGuest(ap, guestCfgPath, true)
 			}

@@ -15,6 +15,17 @@ import (
 // RunStdin runs a command with the given stdin (used so secrets travel in
 // the session's input, never in a command line).
 func (cl *Client) RunStdin(cmd string, stdin []byte) ([]byte, error) {
+	if cl.t.Platform == PlatformAirPort {
+		// as Run: nothing written for OpenWrt may reach an AirPort (the users
+		// sync would edit its passwd file with -apply)
+		return nil, ErrAirPort
+	}
+	return cl.runStdin(cmd, stdin)
+}
+
+// runStdin is RunStdin without the platform guard: the AirPort applier
+// (airport_apply.go) is the one caller that may reach an AirPort.
+func (cl *Client) runStdin(cmd string, stdin []byte) ([]byte, error) {
 	if cl.t.Addr == "local" {
 		if stdin == nil {
 			stdin = []byte{}

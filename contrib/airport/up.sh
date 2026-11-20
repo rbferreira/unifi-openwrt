@@ -2,11 +2,11 @@
 # /mnt/Flash/mesh/up.sh - an AirPort Time Capsule A1470 as a UniFi mesh AP.
 # Started by /mnt/Flash/rc.local. Unpacks and runs the uow daemon, creates a client VAP on
 # the 5 GHz radio (bwl0) with our own wpa_supplicant (the firmware's is broken), puts the
-# uplink in the LAN bridge and starts a 5 GHz AP next to it. Then it watches:
+# uplink in the LAN bridge and leaves the WLANs to the daemon. Then it watches:
 #  - a cable with link on the WAN port = wired uplink: the wireless uplink goes (no loop);
 #  - no WAN link for 20 s: back to the wireless uplink;
 #  - supplicant dead or not associated for 60 s: start over;
-#  - the parent changed channel: the 5 GHz AP follows;
+#  - the parent changed channel: the 5 GHz WLANs start again on it;
 #  - the daemon died: start it again.
 # Log: /mnt/Memory/mesh.log. Nothing here changes the base station's stored configuration.
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
@@ -30,37 +30,29 @@ wan() {
 		exit $r
 	}
 }
-# 5 GHz AP on the uplink's radio (bwl0). The firmware's hostapd only runs the 2.4 GHz WLAN
-# (5 GHz is off in the stored configuration), so this one is started from its config: same
-# SSID and key, on the channel the uplink associated on. hw_mode=a and channel= are both
-# needed: with hw_mode=b it comes up on channel 36 and takes the uplink down.
-AP5=wlan8
+# The WLANs are the daemon's: with -apply it runs one hostapd per WLAN the controller asks
+# for, on VAPs wlan10..17 (2.4 GHz, bwl1) and wlan20..27 (5 GHz, bwl0), and keeps its files in
+# $M/uowap. Both radios are off in the stored configuration, so the firmware runs none.
+# The 5 GHz ones share the radio with the uplink: they are taken down here before the uplink
+# is created again or after it changed channel, and the daemon brings them back.
 upch() { ifconfig $IF 2>/dev/null | while read a b c d e; do case "$a" in ssid) echo $d;; esac; done; }
-ap5_stop() {
-	p=$(cat $M/hostapd_$AP5.pid 2>/dev/null); [ -n "$p" ] && kill $p 2>/dev/null
-	rm -f $M/hostapd_$AP5.pid
-	case "$(brconfig $BR 2>&1)" in *"$AP5 flags"*) brconfig $BR delete $AP5;; esac
-	ifconfig $AP5 destroy 2>/dev/null
-	ap5ch=
-}
-ap5_start() {
-	[ -f /etc/hostap_wlan0.conf ] || { say "no /etc/hostap_wlan0.conf (2.4 GHz off?): no 5 GHz AP"; return; }
-	ch=$(upch); [ -n "$ch" ] || return
-	sed -e "s/wlan0/$AP5/g" -e 's/^phy_mode=.*/phy_mode=10/' -e 's/^hw_mode=.*/hw_mode=a/' -e 's/^mcast_rate=.*/mcast_rate=6/' 	    -e 's/^ifparent=.*/ifparent=bwl0/' -e 's/^allow_ht40=.*/allow_ht40=1/' -e 's/^allow_vht80=.*/allow_vht80=1/' 	    -e 's/^acs=.*/acs=0/' -e '/^wps_/d' -e "s#/etc/hostap_$AP5#$M/hostap_$AP5#g" -e "s#/tmp/hostapd_$AP5#$M/hostapd_$AP5#" 	    /etc/hostap_wlan0.conf > $M/hostap_$AP5.conf
-	echo "channel=$ch" >> $M/hostap_$AP5.conf
-	for f in wpa_psk eap_user time_acc; do [ -f /etc/hostap_wlan0.$f ] && sed "s/wlan0/$AP5/g" /etc/hostap_wlan0.$f > $M/hostap_$AP5.$f; done
-	ifconfig $AP5 create wlandev bwl0 wlanmode hostap || { say "5 GHz AP: create failed"; return; }
-	hostapd -t -F $M/hostap_$AP5.log $M/hostap_$AP5.conf > $M/hostapd_$AP5.out 2>&1 &
-	echo $! > $M/hostapd_$AP5.pid
-	sleep 6
-	brconfig $BR add $AP5 && say "5 GHz AP on channel $ch, in the bridge" || say "5 GHz AP: brconfig failed"
-	ap5ch=$ch
+vaps5_stop() {
+	for f in $M/uowap/wlan2[0-7].pid; do
+		[ -f "$f" ] || continue
+		v=${f##*/}; v=${v%.pid}
+		p=$(cat $f); [ -n "$p" ] && kill $p 2>/dev/null
+		case "$(brconfig $BR 2>&1)" in *"$v flags"*) brconfig $BR delete $v;; esac
+		ifconfig $v destroy 2>/dev/null
+		rm -f $f $M/uowap/$v.conf
+	done
+	upc=
 }
 # The uow daemon (unifi-openwrt, -ap-platform airport) runs on the base station itself.
 # The binary is too big for /mnt/Flash, so it lives xz-compressed in the erased tail of the
 # reserve firmware bank (flash1, see uow.meta) and is unpacked into the RAM disk at boot.
-# Its state directory is in RAM too; only state.json and the adoption SSH keys are kept
-# on flash (the config history it writes would fill the flash in time).
+# Its state directory is in RAM too; state.json, the adoption SSH keys and the controller's
+# last configuration are kept on flash, so the WLANs come up at boot without the controller
+# (the config history it writes would fill the flash in time).
 UOW=$M/uow; ST=$M/state; PST=$D/state
 uow_unpack() {
 	[ -s $D/uow.meta ] && [ -x $D/unxz ] || { say "uow: no uow.meta or unxz, not started"; return 1; }
@@ -70,8 +62,9 @@ uow_unpack() {
 	chmod 755 $UOW
 	mkdir -p $ST $PST
 	for f in $PST/*; do [ -f "$f" ] && cp -p "$f" $ST/; done
-	# the config text is not kept across boots: ask the controller for it again
-	[ -f $ST/state.json ] && sed 's/"cfgversion": "[^"]*"/"cfgversion": "0"/' $ST/state.json > $ST/state.tmp && mv $ST/state.tmp $ST/state.json
+	# regulatory ids of this unit, for the daemon's hostapd configs: saved the first time,
+	# while the firmware still runs a WLAN of its own
+	[ -s $D/hostap.seed ] || { [ -f /etc/hostap_wlan0.conf ] && sed -n -e '/^sku=/p' -e '/^region=/p' /etc/hostap_wlan0.conf > $D/hostap.seed; }
 	return 0
 }
 uow_alive() { p=$(cat $M/uow.pid 2>/dev/null); [ -n "$p" ] && kill -0 $p 2>/dev/null; }
@@ -81,14 +74,14 @@ uow_start() {
 	. $D/uow.conf    # URL= MODEL= NAME=
 	mac=$(ifconfig $BR | while read a b c; do case "$a" in ether) echo $b;; esac; done)
 	$UOW -ap local -ap-platform airport -mac $mac -url "$URL" -model "$MODEL" -profile-caps -hostname "$NAME" \
-		-state $ST -ssh-listen :2222 -health-every 0 -stop-on-reset=false >> $M/uow.log 2>&1 < /dev/null &
+		-apply -state $ST -ssh-listen :2222 -health-every 0 -stop-on-reset=false >> $M/uow.log 2>&1 < /dev/null &
 	echo $! > $M/uow.pid
 	say "uow started (pid $(cat $M/uow.pid))"
 }
 uow_keep() {
 	uow_alive || uow_start
 	# persist the adoption state when it changes (small files only)
-	for f in state.json ssh_host_ed25519.pem ssh_host_ed25519_rsa.pem; do
+	for f in state.json system_cfg.txt ssh_host_ed25519.pem ssh_host_ed25519_rsa.pem; do
 		[ -f $ST/$f ] || continue
 		[ "$(cat $ST/$f)" = "$(cat $PST/$f 2>/dev/null)" ] || { cp -p $ST/$f $PST/$f; say "uow: saved $f"; }
 	done
@@ -96,7 +89,7 @@ uow_keep() {
 }
 alive() { p=$(cat $M/wpa.pid 2>/dev/null); [ -n "$p" ] && kill -0 $p 2>/dev/null; }
 leave() {
-	ap5_stop
+	vaps5_stop
 	inbr && brconfig $BR delete $IF
 	p=$(cat $M/wpa.pid 2>/dev/null); [ -n "$p" ] && kill $p 2>/dev/null
 	rm -f $M/wpa.pid
@@ -104,6 +97,7 @@ leave() {
 	say "$1: wireless uplink removed"
 }
 join() {
+	vaps5_stop
 	A=$(cat /var/run/ACPd.pid)
 	kill -STOP $A
 	ifconfig $IF destroy 2>/dev/null
@@ -121,7 +115,7 @@ join() {
 		sleep 3   # the WPA handshake ends after "associated"
 		brconfig $BR add $IF up && say "uplink associated and in $BR" || say "brconfig failed"
 		led 2
-		ap5_start
+		upc=$(upch)
 	else
 		say "uplink did not associate in 90 s"; led 1
 	fi
@@ -134,7 +128,7 @@ if [ -n "$(pids /usr/sbin/dhcpd)" ]; then say "dhcpd running (router mode): upli
 cp $D/wpa_supplicant $M/wpa_supplicant; chmod 755 $M/wpa_supplicant
 uow_unpack && HAVE_UOW=1 || HAVE_UOW=0
 
-lost=20; meshing=0; bad=0; ap5ch=
+lost=20; meshing=0; bad=0; upc=
 while :; do
 	if wan; then
 		lost=0
@@ -145,8 +139,8 @@ while :; do
 		if [ $meshing = 1 ]; then
 			if alive && assoc; then
 				bad=0
-				# the parent changed channel: the 5 GHz AP follows
-				c=$(upch); [ -n "$ap5ch" ] && [ -n "$c" ] && [ "$c" != "$ap5ch" ] && { say "uplink moved to channel $c"; ap5_stop; ap5_start; }
+				# the parent changed channel: the 5 GHz WLANs start again on it
+				c=$(upch); [ -n "$upc" ] && [ -n "$c" ] && [ "$c" != "$upc" ] && { say "uplink moved to channel $c"; vaps5_stop; upc=$c; }
 			else
 				bad=$((bad + 5))
 			fi
