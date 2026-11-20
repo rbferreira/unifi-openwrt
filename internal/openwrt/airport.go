@@ -45,6 +45,7 @@ for i in $(ifconfig -l); do
   echo "=== iface $i"; ifconfig $i
   echo "=== sta $i"; ifconfig $i list sta
   echo "=== noise $i"; wl -i $i noise
+  echo "=== counters $i"; wl -i $i counters
   echo "=== assoc $i"
   for m in $(wl -i $i assoclist | while read a b; do echo $b; done); do echo "--- $m"; wl -i $i sta_info $m; done
 done
@@ -229,6 +230,24 @@ func ParseAirPort(out []byte, now time.Time) (*Snapshot, error) {
 		k := pktsOf[short(r.Iface)]
 		r.Stats = map[string]int64{"rx_bytes": c.in, "tx_bytes": c.out,
 			"rx_packets": k.in, "tx_packets": k.out, "rx_errors": k.inErr, "tx_errors": k.outErr}
+		// 802.11 counters of the radio ("wl counters": name value pairs). The
+		// driver keeps them per radio, not per VAP or client, so an AP VAP
+		// carries its radio's totals; the uplink VAP of the same radio does not,
+		// or they would count twice.
+		if r.Mode == "Master" {
+			w := map[string]int64{}
+			f := strings.Fields(string(secs.get("counters " + r.Iface)))
+			for i := 0; i+1 < len(f); i += 2 {
+				if _, seen := w[f[i]]; !seen {
+					w[f[i]] = atoi(f[i+1])
+				}
+			}
+			if w["txframe"] > 0 {
+				r.Stats["wifi_tx"], r.Stats["wifi_retries"], r.Stats["wifi_failed"] = w["txframe"], w["txretrans"], w["txerror"]
+				r.Stats["tx_errors"], r.Stats["rx_errors"] = w["txerror"], w["rxerror"]
+				r.Stats["tx_dropped"], r.Stats["rx_dropped"] = w["txnobuf"]+w["txfail"], w["rxnobuf"]
+			}
+		}
 		i, seen := idx[r.Phy]
 		if !seen {
 			base := r

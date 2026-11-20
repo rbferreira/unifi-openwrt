@@ -76,6 +76,12 @@ ADDR               AID CHAN TXRATE RXRATE  RSSI IDLE  TXSEQ  RXSEQ CAPS FLAG
 02:dd:00:00:00:01    1    6    72M    65M -48.0    2      0      0      E
 === noise wlan0
 -87
+=== counters wlan0
+txframe 17640 txbyte 2896189 txretrans 41 txerror 25 rxframe 16939 rxbyte 2524696 rxerror 3
+txprshort 0 txdmawar 0 txnobuf 2 txnoassoc 10 txchit 61 txcmiss 17586
+reset 7 txserr 96 txphyerr 0 txphycrs 0 txfail 1 tbtt 13237
+rxcrc 273844 rxnobuf 4 rxnondata 0
+txphyerr 9
 === assoc wlan0
 --- 02:DD:00:00:00:01
  STA 02:DD:00:00:00:01:
@@ -147,8 +153,12 @@ func TestParseAirPort(t *testing.T) {
 	if ap.Mode != "Master" || ap.SSID != "Home Net" || ap.Channel != 6 || ap.Width != 20 || ap.Stats["tx_bytes"] != 1340732 {
 		t.Errorf("ap vap: %+v", ap)
 	}
-	if ap.Stats["rx_packets"] != 12 || ap.Stats["tx_packets"] != 817 || ap.Stats["rx_errors"] != 1 || ap.Stats["tx_errors"] != 2 {
+	if ap.Stats["rx_packets"] != 12 || ap.Stats["tx_packets"] != 817 || ap.Stats["tx_errors"] != 25 {
 		t.Errorf("ap packets: %v", ap.Stats)
+	}
+	if ap.Stats["wifi_tx"] != 17640 || ap.Stats["wifi_retries"] != 41 || ap.Stats["wifi_failed"] != 25 ||
+		ap.Stats["tx_dropped"] != 3 || ap.Stats["rx_dropped"] != 4 || ap.Stats["rx_errors"] != 3 {
+		t.Errorf("radio counters: %v", ap.Stats)
 	}
 	if len(ap.Stations) != 1 {
 		t.Fatalf("stations: %+v", ap.Stations)
@@ -159,6 +169,9 @@ func TestParseAirPort(t *testing.T) {
 		t.Errorf("station: %+v", st)
 	}
 	up := s.Radios[1].VAPs[0]
+	if _, has := up.Stats["wifi_tx"]; has {
+		t.Errorf("the uplink VAP must not carry the radio counters: %v", up.Stats)
+	}
 	if up.Mode != "Client" || up.BSSID != "02:bb:00:00:00:02" || up.Width != 80 || !up.VHT || up.TxPower != 31 {
 		t.Errorf("uplink vap: %+v", up)
 	}
