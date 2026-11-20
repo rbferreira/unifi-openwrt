@@ -223,7 +223,8 @@ on 2.4 GHz (`bwl1`), `wlan20`..`wlan27` on 5 GHz (`bwl0`), configs and logs in
 | WPA3 and WPA2/WPA3 (the firmware's hostapd is 0.6.5, no SAE), WPA-Enterprise | the WLAN is left off, never downgraded |
 | 2.4 GHz channel | applied; "auto" keeps the channel the radio is on |
 | 5 GHz channel | the mesh uplink's while there is one, else the console's |
-| Channel width, transmit power | not applied: the driver ignores hostapd's keys for them |
+| Channel width | not applied. On 5 GHz with a mesh uplink the radio keeps the width the uplink negotiated: hostapd's `allow_vht80=0` and `allow_ht40=0` changed nothing there (measured). Not explored without an uplink or on 2.4 GHz |
+| Transmit power | not applied: hostapd's `tx_power` showed no effect |
 | Guest networks, WLANs on a VLAN | left off (they would need a bridge of their own) |
 | Client isolation, MAC filter (including clients locked to another AP), PMF, 802.11r/k/v, band steering, rate limits, schedules, device logins | not applied |
 

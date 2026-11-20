@@ -158,10 +158,10 @@ func AirPortVAPs(w translate.Wanted, uplink5 int) ([]AirPortVAP, []string) {
 		}
 	}
 	if len(width) > 0 {
-		notes = append(notes, fmt.Sprintf("channel width not applied (%s): this driver ignores it, the radio keeps its own", strings.Join(width, ", ")))
+		notes = append(notes, fmt.Sprintf("channel width not applied (%s): the radio keeps its own (with a mesh uplink, the uplink's)", strings.Join(width, ", ")))
 	}
 	if len(power) > 0 {
-		notes = append(notes, fmt.Sprintf("transmit power not applied (%s): this driver ignores it", strings.Join(power, ", ")))
+		notes = append(notes, fmt.Sprintf("transmit power not applied (%s): hostapd's tx_power has no effect here", strings.Join(power, ", ")))
 	}
 	if isolate > 0 {
 		notes = append(notes, fmt.Sprintf("client isolation requested on %d WLAN(s): not supported on this platform", isolate))
