@@ -1,12 +1,13 @@
 #!/bin/sh
-# /mnt/Flash/mesh/up.sh - wireless (mesh) uplink for an AirPort Time Capsule A1470 on its
-# 5 GHz radio (bwl0). Started by /mnt/Flash/rc.local. Creates a client VAP, starts our own
-# wpa_supplicant (the firmware's is broken), puts the uplink in the LAN bridge and starts a
-# 5 GHz AP next to it. Then it watches:
+# /mnt/Flash/mesh/up.sh - an AirPort Time Capsule A1470 as a UniFi mesh AP.
+# Started by /mnt/Flash/rc.local. Unpacks and runs the uow daemon, creates a client VAP on
+# the 5 GHz radio (bwl0) with our own wpa_supplicant (the firmware's is broken), puts the
+# uplink in the LAN bridge and starts a 5 GHz AP next to it. Then it watches:
 #  - a cable with link on the WAN port = wired uplink: the wireless uplink goes (no loop);
 #  - no WAN link for 20 s: back to the wireless uplink;
 #  - supplicant dead or not associated for 60 s: start over;
-#  - the parent changed channel: the 5 GHz AP follows.
+#  - the parent changed channel: the 5 GHz AP follows;
+#  - the daemon died: start it again.
 # Log: /mnt/Memory/mesh.log. Nothing here changes the base station's stored configuration.
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
 D=/mnt/Flash/mesh; M=/mnt/Memory; IF=wlan9; BR=bridge0
@@ -55,6 +56,44 @@ ap5_start() {
 	brconfig $BR add $AP5 && say "5 GHz AP on channel $ch, in the bridge" || say "5 GHz AP: brconfig failed"
 	ap5ch=$ch
 }
+# The uow daemon (unifi-openwrt, -ap-platform airport) runs on the base station itself.
+# The binary is too big for /mnt/Flash, so it lives xz-compressed in the erased tail of the
+# reserve firmware bank (flash1, see uow.meta) and is unpacked into the RAM disk at boot.
+# Its state directory is in RAM too; only state.json and the adoption SSH keys are kept
+# on flash (the config history it writes would fill the flash in time).
+UOW=$M/uow; ST=$M/state; PST=$D/state
+uow_unpack() {
+	[ -s $D/uow.meta ] && [ -x $D/unxz ] || { say "uow: no uow.meta or unxz, not started"; return 1; }
+	. $D/uow.meta
+	dd if=/dev/rflash1c bs=65536 skip=$SKIP count=$COUNT 2>/dev/null | $D/unxz > $UOW || { say "uow: unpack failed"; return 1; }
+	set -- $(ls -l $UOW); [ "$5" = "$SIZE" ] || { say "uow: unpacked $5 bytes, expected $SIZE"; return 1; }
+	chmod 755 $UOW
+	mkdir -p $ST $PST
+	for f in $PST/*; do [ -f "$f" ] && cp -p "$f" $ST/; done
+	# the config text is not kept across boots: ask the controller for it again
+	[ -f $ST/state.json ] && sed 's/"cfgversion": "[^"]*"/"cfgversion": "0"/' $ST/state.json > $ST/state.tmp && mv $ST/state.tmp $ST/state.json
+	return 0
+}
+uow_alive() { p=$(cat $M/uow.pid 2>/dev/null); [ -n "$p" ] && kill -0 $p 2>/dev/null; }
+uow_start() {
+	[ -x $UOW ] && [ -s $D/uow.conf ] || return
+	case "$(ifconfig $BR)" in *"inet 1"[0-9]*|*"inet 19"[0-9]*|*"inet 2"*) ;; *) return ;; esac   # wait for an address
+	. $D/uow.conf    # URL= MODEL= NAME=
+	mac=$(ifconfig $BR | while read a b c; do case "$a" in ether) echo $b;; esac; done)
+	$UOW -ap local -ap-platform airport -mac $mac -url "$URL" -model "$MODEL" -profile-caps -hostname "$NAME" \
+		-state $ST -ssh-listen :2222 -health-every 0 -stop-on-reset=false >> $M/uow.log 2>&1 < /dev/null &
+	echo $! > $M/uow.pid
+	say "uow started (pid $(cat $M/uow.pid))"
+}
+uow_keep() {
+	uow_alive || uow_start
+	# persist the adoption state when it changes (small files only)
+	for f in state.json ssh_host_ed25519.pem ssh_host_ed25519_rsa.pem; do
+		[ -f $ST/$f ] || continue
+		[ "$(cat $ST/$f)" = "$(cat $PST/$f 2>/dev/null)" ] || { cp -p $ST/$f $PST/$f; say "uow: saved $f"; }
+	done
+	set -- $(ls -l $M/uow.log 2>/dev/null); [ "${5:-0}" -gt 400000 ] && : > $M/uow.log
+}
 alive() { p=$(cat $M/wpa.pid 2>/dev/null); [ -n "$p" ] && kill -0 $p 2>/dev/null; }
 leave() {
 	ap5_stop
@@ -93,14 +132,7 @@ say "up.sh start"
 # Bridging the uplink into it would leak that server onto the network. Bridge mode only.
 if [ -n "$(pids /usr/sbin/dhcpd)" ]; then say "dhcpd running (router mode): uplink NOT started"; led 1; exit 0; fi
 cp $D/wpa_supplicant $M/wpa_supplicant; chmod 755 $M/wpa_supplicant
-# UniFi adoption: the console opens SSH to this base station on port 2222; the uow daemon
-# runs on another host, so a relay forwards it. relay.conf: "DAEMON_IP CONSOLE_IP".
-if [ -s $D/relay.conf ] && [ -x $D/relay ]; then
-	read RD RC < $D/relay.conf
-	cp $D/relay $M/relay; chmod 755 $M/relay
-	$M/relay 2222 $RD 2222 $RC > /dev/null 2>&1 &
-	say "adoption relay: 2222 -> $RD:2222 (from $RC only)"
-fi
+uow_unpack && HAVE_UOW=1 || HAVE_UOW=0
 
 lost=20; meshing=0; bad=0; ap5ch=
 while :; do
@@ -121,5 +153,6 @@ while :; do
 			if [ $bad -ge 60 ]; then leave "not associated for 60 s"; meshing=0; lost=20; bad=0; led 1; fi
 		fi
 	fi
+	[ $HAVE_UOW = 1 ] && uow_keep
 	sleep 5
 done

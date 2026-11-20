@@ -5,10 +5,9 @@ network as a wireless (mesh) child of a UniFi AP, serve WLANs on both bands, and
 the UniFi console through `uow -ap-platform airport`. This directory is the kit and the
 runbook to repeat it on another unit.
 
-It is a different thing from the rest of this project. An AirPort does not run OpenWrt and
-cannot run `uow` (see [What does not work](#what-does-not-work)): the daemon runs on another
-host and reads the base station over SSH, **read-only**. The console shows the device; it
-does not configure it.
+It is a different thing from the rest of this project. An AirPort does not run OpenWrt: the
+daemon runs on the base station itself, built with a patched Go toolchain ([go/](go/README.md)),
+and is **read-only** there. The console shows the device; it does not configure it.
 
 ## What you get
 
@@ -17,7 +16,8 @@ does not configure it.
 | Uplink | 5 GHz client on the parent UniFi AP's mesh backhaul SSID (`vwire-…`), bridged at layer 2: hosts behind the AirPort keep their own MAC addresses |
 | WLANs | one SSID on 2.4 GHz (the firmware's own hostapd) and the same SSID on 5 GHz (a second hostapd on the uplink's radio) |
 | LAN ports | bridged to the uplink |
-| In the console | adopted as a UAP-AC-Pro (`U7PG2`): radios, WLANs, clients with signal and rates, packet and byte counters, the wireless uplink and its parent, ports, CPU and memory; Restart works; the LED follows the UniFi state |
+| In the console | adopted as a UAP-AC-Pro (`U7PG2`): radios, WLANs, clients with signal and rates, packet, byte, retry and error counters, the wireless uplink and its parent, ports, CPU and memory; Restart works; the LED follows the UniFi state |
+| Depends on | nothing but the base station: no second host |
 | Survives | reboot and power loss: back on the mesh about 2 minutes after power-on |
 
 Measured, one hop from a U7 Lite at -27 dBm (uplink PHY rate 866 Mbit/s), downloading from a
@@ -46,8 +46,7 @@ which this builds on, for the A1392.
 
 ## Steps
 
-Placeholders: `AP` the base station, `CONSOLE` the UniFi console, `DAEMON` the host that
-runs `uow`. Work over a cable on a LAN port until the uplink is proven.
+Work over a cable on a LAN port until the uplink is proven.
 
 ### 1. Root shell
 
@@ -74,30 +73,35 @@ There is no sftp: copy files with `ssh … 'cat > /path' < file`. **Change the a
 (`airportctl admin-password`) before the unit is on a network you do not control alone: the
 debug shell is root with that password.
 
-### 2. Build the two binaries
+### 2. Build
 
-On Linux (WSL works), with `gcc-arm-linux-gnueabi`:
+On Linux (WSL works), with `gcc-arm-linux-gnueabi` and `xz`:
 
 ```sh
 cd build
 ./setup.sh         # NetBSD 7.0 evbarm-earm headers and libc, wpa_supplicant 0.7.3 (checksummed)
 ./build-wpa.sh     # out/wpa_supplicant, about 320 KB
-./build-relay.sh   # out/relay
+./build-unxz.sh    # out/unxz, about 250 KB
+```
+
+and the daemon with the patched Go toolchain, then packed for the flash:
+
+```sh
+# see go/README.md for GOROOT
+GOROOT=... GOTOOLCHAIN=local GOOS=netbsd GOARCH=arm GOARM=7 CGO_ENABLED=0 \
+    go build -trimpath -ldflags='-s -w' -o uow-netbsd-arm ./cmd/uow     # about 9 MB
+build/pack-uow.sh uow-netbsd-arm                                       # out/uow.blob, out/uow.meta.new
 ```
 
 The firmware's own `wpa_supplicant` (0.6.5) cannot be used: started by hand it does nothing
 and logs nothing, and started by the firmware's "join a network" mode it dies at startup.
 
-What had to change against stock headers, all in `build/compat/`:
+What had to change against stock headers for the C programs, all in `build/compat/`:
 
 | Mismatch | Fix |
 |---|---|
 | `struct if_msghdr` is 160 bytes on this kernel, 152 in NetBSD 7: `getifaddrs()` returns empty names and `if_nametoindex()` fails | `compat/net/if.h`, and NetBSD's `getifaddrs.c` rebuilt against it |
 | The 802.11 ioctls are FreeBSD 8's, as on the A1392 | `compat/net80211/ieee80211_ioctl.h`, unchanged from airport-express-tools |
-
-A static binary linked against NetBSD 7's libc runs on the 6.0 kernel. **Go does not**: a
-`netbsd/arm` binary dies creating its first thread (`errno=-22`), which is why `uow` runs
-elsewhere.
 
 ### 3. Stored configuration (over ACP)
 
@@ -124,11 +128,12 @@ mkdir -p /mnt/Flash/mesh          # on the base station
 | File | To | |
 |---|---|---|
 | `build/out/wpa_supplicant` | `/mnt/Flash/mesh/wpa_supplicant` | |
-| `build/out/relay` | `/mnt/Flash/mesh/relay` | mode 755 |
+| `build/out/unxz` | `/mnt/Flash/mesh/unxz` | mode 755 |
 | `up.sh` | `/mnt/Flash/mesh/up.sh` | |
 | `wpa.conf` | `/mnt/Flash/mesh/wpa.conf` | from `wpa.conf.example`: the parent's backhaul SSID and its PMK; mode 600 |
-| `relay.conf` | `/mnt/Flash/mesh/relay.conf` | one line: `DAEMON CONSOLE` |
+| `uow.conf` | `/mnt/Flash/mesh/uow.conf` | from `uow.conf.example`: inform URL, UniFi model, name |
 | `rc.local` | `/mnt/Flash/rc.local` | mode 644 |
+| `build/out/uow.blob`, `uow.meta.new`, `flash-uow.sh` | `/mnt/Memory/` | then `sh /mnt/Memory/flash-uow.sh` |
 
 The backhaul SSID and key are what the console hands a UniFi mesh child; an OpenWrt AP
 already meshing through this project has them in `/etc/unifi-openwrt/mesh.conf`.
@@ -136,36 +141,37 @@ already meshing through this project has them in `/etc/unifi-openwrt/mesh.conf`.
 `rc.local` is **sourced** by the boot script: it must never `exit` or block. Everything in
 it runs in a background subshell.
 
+**Where the daemon lives.** `/mnt/Flash` is 2.5 MB and the binary is 9 MB (2.5 MB as xz).
+The flash has two 14 MB firmware banks: `flash0` with the running firmware and `flash1`
+with the factory one. In both the image ends near 8.2 MB and the rest, up to a trailer in
+the last 64 KB sector, is erased. `flash-uow.sh` writes the compressed binary into that
+erased tail of `flash1` (from sector 144), leaving the factory image and the running bank
+alone, and `up.sh` unpacks it into the RAM disk at every boot. Checked after writing: a
+full read of both banks differed from the read before only in the sectors written.
+
+The daemon's state directory is in RAM as well. Only `state.json` and the adoption SSH keys
+are copied to `/mnt/Flash/mesh/state` when they change: the configuration history the
+daemon keeps would fill the flash in time. At boot `cfgversion` is reset so the controller
+sends the configuration again.
+
 Reboot. `up.sh` logs to `/mnt/Memory/mesh.log`:
 
 ```
 up.sh start
-adoption relay: 2222 -> DAEMON:2222 (from CONSOLE only)
 uplink associated and in bridge0
 5 GHz AP on channel 40, in the bridge
+uow started (pid 151)
 ```
 
-### 5. The daemon
+### 5. Adopt
 
-On `DAEMON` (any Linux host that reaches both the console and the base station):
-
-```sh
-uow -ap AP:22 -ap-platform airport -ap-password-file ap.pw -ap-known-hosts ap_known_hosts \
-    -mac <bridge0 MAC> -url http://CONSOLE:8080/inform -model U7PG2 -profile-caps \
-    -hostname AirPort -state state -ssh-listen :2222 -health-every 0 -stop-on-reset=false
-```
-
-`ap_known_hosts` is `AP ssh-rsa <key>` with the key from `/mnt/Flash/ssh_host_rsa_key.pub`;
-`ap.pw` holds the admin password. `-mac` is the `ether` of `bridge0`.
-
-The device appears as pending. Adopt it in the console: the console opens SSH to the base
-station's address on port 2222, the relay forwards that to the daemon, and the daemon
-answers the adoption there.
+The device appears in the console as pending. Adopt it there: the console opens SSH to the
+base station on port 2222, where the daemon answers the adoption.
 
 ## What `up.sh` does
 
 1. Refuses to go on if `dhcpd` is running (router mode).
-2. Starts the relay.
+2. Unpacks the daemon from `flash1` into the RAM disk and checks its size.
 3. With no link on the WAN port for 20 s: creates a client VAP on `bwl0`, starts
    `wpa_supplicant`, waits for the association, adds the VAP to `bridge0`.
 4. Starts a 5 GHz AP on the same radio, from the firmware's 2.4 GHz hostapd config, on the
@@ -173,7 +179,8 @@ answers the adoption there.
 5. Every 5 s: a cable with link on the WAN port removes the wireless uplink and the 5 GHz AP
    (a wired uplink and a wireless one together are a loop); an uplink that is not associated
    for 60 s is torn down and tried again; a parent that changed channel restarts the 5 GHz AP
-   on the new one.
+   on the new one; the daemon is started once the bridge has an address and restarted if it
+   dies.
 
 The sequence that brings the client VAP up, for doing it by hand:
 
@@ -192,6 +199,14 @@ sleep 3; kill -CONT $A
 - **Never plug a LAN port into the rest of the network while the mesh is up.** Only the WAN
   port is watched. That the WAN port is PHY index 0 comes from airport-express-tools' notes
   on the A1392; on the A1470 it was not confirmed with a cable.
+- **Never run `eraseflash`, and never `flashctl … erase` without a sector number.** The first
+  erases `/mnt/Flash` (the base station's configuration, its SSH keys and this kit) even with
+  no arguments; it happened here, with the unit running. Recovery without a reboot, as
+  `/etc/rc.d/flash` does it: `umount -f /mnt/Flash; flashctl /dev/rflash2.raw erase;
+  flashctl /dev/rflash2.raw format 0x1234; disklabel -w -r -f /etc/flash2.disktab flash2 flash;
+  newfs /dev/rflash2a; mount /mnt/Flash`, copy the host keys back from `/etc/ssh`, reinstall
+  the kit, then reboot over ACP: the firmware writes its `ACPData.bin` when it shuts down,
+  not at each change.
 - **Never run `wl … chanim_stats`.** It panics the kernel on both radios. Once the unit rebooted
   and came back on its own; the second time it did not come back by itself.
 - The console does not configure the base station. SSID, key and channel are changed over
@@ -201,11 +216,11 @@ sleep 3; kill -CONT $A
 
 | | |
 |---|---|
-| `uow` on the base station | Go binaries do not run on this kernel |
+| Stock Go on the base station | dies creating its first thread; see [go/](go/README.md) for the patched toolchain |
 | The firmware's `wpa_supplicant`, and its "join a network" mode | broken, see step 2 |
-| Channel utilization | the only source found (`chanim_stats`) panics the kernel |
+| Channel utilization | `chanim_stats` panics the kernel; `cca_get_stats`, `itfr_get_stats`, `pktq_stats` and `rate_histo` are not supported by this driver build |
 | Temperatures and fan in the console | `envstat` reads four board sensors and the fan, but for an AP the controller keeps only `has_temperature` / `has_fan` and drops the values |
-| Per-client retry counters | `wl sta_info` on this driver has none, so the experience score only sees the PHY rate |
+| Per-client retry counters | `wl sta_info` on this driver has none, so the experience score only sees the PHY rate. Retries and errors are reported per radio, from `wl counters` |
 | A second SSID (IoT, guest) | the `WiFi` blob has a `vaps` list per radio; not explored |
 | A separate MAC for the 5 GHz AP | `wlanaddr` is ignored: the AP's BSSID is the client VAP's MAC. It works that way |
 | `wl dwds_config enable sta <bssid>` | not needed, and after it (together with a test bridge) the link stopped passing traffic until the supplicant was restarted |
@@ -214,7 +229,8 @@ sleep 3; kill -CONT $A
 
 ## Tested and not tested
 
-Tested on one A1470: several reboots with the kit, each coming back on its own; a wired client and Wi-Fi clients on both
+Tested on one A1470: several reboots with the kit, each coming back on its own, the last with
+the daemon on the base station and no other host involved; a wired client and Wi-Fi clients on both
 bands, each with a ping in both directions and a download; a wired host on the LAN learning
 the real MAC of a client behind the base station; adoption; a phone on the real SSID showing
 in the console with the same signal and rates the base station reports.
@@ -224,8 +240,8 @@ channel; any other AirPort model; a parent that is not a UniFi AP.
 
 ## Undo
 
-On the daemon host, stop `uow`. On the base station, delete `/mnt/Flash/mesh` and
-`/mnt/Flash/rc.local`. Restore the Wi-Fi backup `airportctl` made before the first write
+On the base station, delete `/mnt/Flash/mesh` and `/mnt/Flash/rc.local` (the image in the
+tail of `flash1` is inert without them). Restore the Wi-Fi backup `airportctl` made before the first write
 (`airportctl wifi restore <file> --untested`), set `mode sharing nat --untested`, reboot, and
 forget the device in the console. A factory reset also clears the stored configuration, but
 not the files on `/mnt/Flash`.

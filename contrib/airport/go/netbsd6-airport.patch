@@ -1,0 +1,164 @@
+--- a/src/runtime/defs1_netbsd_arm.go
++++ b/src/runtime/defs1_netbsd_arm.go
+@@ -155,7 +155,8 @@
+ 	uc_link     *ucontextt
+ 	uc_sigmask  sigset
+ 	uc_stack    stackt
+-	_           [4]byte // EABI
++	// no EABI padding here: Apple's NetBSD 6.0 kernel on the AirPort lays the
++	// ucontext out without it (mcontext at offset 36, measured on an A1470)
+ 	uc_mcontext mcontextt
+ 	__uc_pad    [2]int32
+ }
+--- a/src/runtime/sys_netbsd_arm.s
++++ b/src/runtime/sys_netbsd_arm.s
+@@ -46,6 +46,7 @@
+ #define SYS___nanosleep50		SWI_OS_NETBSD | 430
+ #define SYS___kevent50			SWI_OS_NETBSD | 435
+ #define SYS____lwp_park60		SWI_OS_NETBSD | 478
++#define SYS____lwp_park50		SWI_OS_NETBSD | 434
+ 
+ // Exit the entire program (like C exit)
+ TEXT runtime·exit(SB),NOSPLIT|NOFRAME,$0
+@@ -126,15 +127,13 @@
+ 	RET
+ 
+ TEXT runtime·lwp_park(SB),NOSPLIT,$8
+-	MOVW clockid+0(FP), R0		// arg 1 - clock_id
+-	MOVW flags+4(FP), R1		// arg 2 - flags
+-	MOVW ts+8(FP), R2		// arg 3 - ts
+-	MOVW unpark+12(FP), R3		// arg 4 - unpark
+-	MOVW hint+16(FP), R4		// arg 5 - hint
+-	MOVW R4, 4(R13)
+-	MOVW unparkhint+20(FP), R5	// arg 6 - unparkhint
+-	MOVW R5, 8(R13)
+-	SWI $SYS____lwp_park60
++	// NetBSD 6.0 has no ___lwp_park60: use ___lwp_park50(ts, unpark, hint,
++	// unparkhint), whose ts is an absolute CLOCK_REALTIME time (see semasleep).
++	MOVW ts+8(FP), R0		// arg 1 - ts (absolute)
++	MOVW unpark+12(FP), R1		// arg 2 - unpark
++	MOVW hint+16(FP), R2		// arg 3 - hint
++	MOVW unparkhint+20(FP), R3	// arg 4 - unparkhint
++	SWI $SYS____lwp_park50
+ 	MOVW	R0, ret+24(FP)
+ 	RET
+ 
+--- a/src/runtime/os_netbsd.go
++++ b/src/runtime/os_netbsd.go
+@@ -167,7 +167,9 @@
+ 			if wait <= 0 {
+ 				return -1
+ 			}
+-			ts.setNsec(wait)
++			// ___lwp_park50 (NetBSD 6.0) takes an absolute wall-clock time
++			sec, nsec := walltime()
++			ts.setNsec(sec*1e9 + int64(nsec) + wait)
+ 			tsp = &ts
+ 		}
+ 		ret := lwp_park(_CLOCK_MONOTONIC, _TIMER_RELTIME, tsp, 0, unsafe.Pointer(&gp.m.waitsemacount), nil)
+--- a/src/runtime/signal_netbsd.go
++++ b/src/runtime/signal_netbsd.go
+@@ -17,7 +17,10 @@
+ 	/*  9 */ {0, "SIGKILL: kill"},
+ 	/* 10 */ {_SigPanic + _SigUnblock, "SIGBUS: bus error"},
+ 	/* 11 */ {_SigPanic + _SigUnblock, "SIGSEGV: segmentation violation"},
+-	/* 12 */ {_SigThrow, "SIGSYS: bad system call"},
++	// NetBSD 6.0 (Apple's AirPort kernel) lacks system calls the standard library
++	// probes for (wait6, ...). The kernel answers ENOSYS and also posts SIGSYS;
++	// ignoring the signal leaves the ENOSYS fallbacks to do their job.
++	/* 12 */ {_SigNotify + _SigIgn, "SIGSYS: bad system call"},
+ 	/* 13 */ {_SigNotify, "SIGPIPE: write to broken pipe"},
+ 	/* 14 */ {_SigNotify, "SIGALRM: alarm clock"},
+ 	/* 15 */ {_SigNotify + _SigKill, "SIGTERM: termination"},
+--- a/src/net/sock_cloexec.go
++++ b/src/net/sock_cloexec.go
+@@ -12,6 +12,7 @@
+ import (
+ 	"os"
+ 	"syscall"
++	"unsafe"
+ )
+ 
+ // Wrapper around the socket system call that marks the returned file
+@@ -21,5 +22,24 @@
+ 	if err != nil {
+ 		return -1, os.NewSyscallError("socket", err)
+ 	}
++	// NetBSD 6.0: SOCK_NONBLOCK marks the file non-blocking but leaves the
++	// socket itself blocking (connect and read then block and no deadline
++	// can interrupt them). Setting it again through fcntl reaches the socket.
++	if err = netbsd6SetNonblock(s); err != nil {
++		syscall.Close(s)
++		return -1, os.NewSyscallError("setnonblock", err)
++	}
+ 	return s, nil
+ }
++
++// netbsd6SetNonblock makes the socket itself non-blocking. On NetBSD 6.0
++// (measured on Apple's AirPort kernel) SOCK_NONBLOCK only marks the file, and
++// an F_SETFL that does not change the flag is a no-op; FIONBIO is not.
++func netbsd6SetNonblock(fd int) error {
++	on := int32(1)
++	const fionbio = 0x8004667e // _IOW('f', 126, int)
++	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), fionbio, uintptr(unsafe.Pointer(&on))); e != 0 {
++		return e
++	}
++	return nil
++}
+--- a/src/net/fd_unix.go
++++ b/src/net/fd_unix.go
+@@ -45,7 +45,7 @@
+ 	// because fd is not yet accessible to user,
+ 	// so no concurrent operations are possible.
+ 	switch err := connectFunc(fd.pfd.Sysfd, ra); err {
+-	case syscall.EINPROGRESS, syscall.EALREADY, syscall.EINTR:
++	case syscall.EINPROGRESS, syscall.EALREADY, syscall.EINTR, syscall.EAGAIN: // EAGAIN: NetBSD 6.0 (AirPort) for a connect in progress
+ 	case nil, syscall.EISCONN:
+ 		select {
+ 		case <-ctx.Done():
+@@ -128,7 +128,7 @@
+ 			return nil, os.NewSyscallError("getsockopt", err)
+ 		}
+ 		switch err := syscall.Errno(nerr); err {
+-		case syscall.EINPROGRESS, syscall.EALREADY, syscall.EINTR:
++		case syscall.EINPROGRESS, syscall.EALREADY, syscall.EINTR, syscall.EAGAIN: // EAGAIN: NetBSD 6.0 (AirPort) for a connect in progress
+ 		case syscall.EISCONN:
+ 			return nil, nil
+ 		case syscall.Errno(0):
+--- a/src/internal/poll/sock_cloexec.go
++++ b/src/internal/poll/sock_cloexec.go
+@@ -9,7 +9,10 @@
+ 
+ package poll
+ 
+-import "syscall"
++import (
++	"syscall"
++	"unsafe"
++)
+ 
+ // Wrapper around the accept system call that marks the returned file
+ // descriptor as nonblocking and close-on-exec.
+@@ -18,5 +21,22 @@
+ 	if err != nil {
+ 		return -1, nil, "accept4", err
+ 	}
++	// NetBSD 6.0: see net.sysSocket.
++	if err = netbsd6SetNonblock(ns); err != nil {
++		CloseFunc(ns)
++		return -1, nil, "setnonblock", err
++	}
+ 	return ns, sa, "", nil
+ }
++
++// netbsd6SetNonblock makes the socket itself non-blocking. On NetBSD 6.0
++// (measured on Apple's AirPort kernel) SOCK_NONBLOCK only marks the file, and
++// an F_SETFL that does not change the flag is a no-op; FIONBIO is not.
++func netbsd6SetNonblock(fd int) error {
++	on := int32(1)
++	const fionbio = 0x8004667e // _IOW('f', 126, int)
++	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), fionbio, uintptr(unsafe.Pointer(&on))); e != 0 {
++		return e
++	}
++	return nil
++}
