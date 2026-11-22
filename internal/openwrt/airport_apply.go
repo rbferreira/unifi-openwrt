@@ -494,6 +494,7 @@ radio() {
 	done
 	echo "$ch" > $D/$r.chan
 	for v in "$@"; do start $v $r $ch $1; done
+	fresh="$fresh $r"
 }
 # iso VAP FLAG: client isolation is the driver's AP bridging: "-apbridge" keeps
 # the stations of the VAP apart, "apbridge" lets them talk (measured: wl
@@ -513,6 +514,9 @@ tenths() {
 txpow() {
 	r=$1; v=$2; n=$3
 	running $v || return
+	# a hostapd that has just started puts the radio back on its default power a
+	# moment after the VAP is up (measured): let it, then set ours
+	case " $fresh " in *" $r "*) sleep 6;; esac
 	cur=$(ifconfig $v 2>/dev/null | sed -n 's/.*[[:space:]]txpower \([0-9][0-9.]*\).*/\1/p')
 	[ -n "$cur" ] || return
 	f=$D/$r.txpower0
