@@ -364,7 +364,7 @@ func TestAirPortGuestRun(t *testing.T) {
 func TestAirPortGuestScriptSyntax(t *testing.T) {
 	g := PFGuest{VAPs: []string{"wlan11", "wlan21"}, Restricted: []string{"10.0.0.0/8", "224.0.0.0/4"}, PreAllow: []string{"192.0.2.1/32"}}
 	iso := []PFIso{{"wlan11", "bridge0"}, {"wlan21", "bridge0"}}
-	s, err := AirPortPFScriptGuest([]PFLimit{{"wlan10", 3000}}, iso, pfAll, g)
+	s, err := AirPortPFScriptGuest([]PFLimit{{VAP: "wlan10", DownKbps: 3000}}, iso, pfAll, g)
 	if err != nil {
 		t.Fatal(err)
 	}

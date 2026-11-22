@@ -32,18 +32,18 @@ func TestAirPortLimits(t *testing.T) {
 		{"none", nil, nil, nil},
 		{"download on both bands", []translate.VAPLimit{
 			{Devname: "wifi1ap1", DownKbps: 5000}, {Devname: "wifi0ap1", DownKbps: 2000}},
-			[]PFLimit{{"wlan11", 2000}, {"wlan21", 5000}}, []string{"shared by its clients"}},
+			[]PFLimit{{VAP: "wlan11", DownKbps: 2000}, {VAP: "wlan21", DownKbps: 5000}}, []string{"shared by its clients"}},
 		{"upload only", []translate.VAPLimit{{Devname: "wifi0ap0", UpKbps: 1000}},
 			nil, []string{`upload limit ignored on WLAN(s) "Home"`}},
 		{"both, one WLAN on two bands", []translate.VAPLimit{
 			{Devname: "wifi0ap1", DownKbps: 2000, UpKbps: 500}, {Devname: "wifi1ap1", DownKbps: 2000, UpKbps: 500}},
-			[]PFLimit{{"wlan11", 2000}, {"wlan21", 2000}}, []string{"shared by", `WLAN(s) "Kids":`}},
+			[]PFLimit{{VAP: "wlan11", DownKbps: 2000}, {VAP: "wlan21", DownKbps: 2000}}, []string{"shared by", `WLAN(s) "Kids":`}},
 		{"unknown devname", []translate.VAPLimit{{Devname: "wifi0ap7", DownKbps: 100}},
 			nil, []string{"wifi0ap7: no VAP"}},
 		{"1 Gbit or more is no cap", []translate.VAPLimit{{Devname: "wifi0ap0", DownKbps: 1000000}},
 			nil, []string{`"Home" is 1 Gbit/s or more`}},
 		{"lowest wins", []translate.VAPLimit{{Devname: "wifi0ap0", DownKbps: 900}, {Devname: "wifi0ap0", DownKbps: 300}},
-			[]PFLimit{{"wlan10", 300}}, []string{"shared by"}},
+			[]PFLimit{{VAP: "wlan10", DownKbps: 300}}, []string{"shared by"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, notes := AirPortLimits(tc.lims, limVAPs())
@@ -71,7 +71,7 @@ qos.vap.2.devname=wifi1ap1
 qos.vap.2.dwnlink.maxspeed=2000
 `)
 	got, notes := AirPortLimits(translate.QoSLimits(cfg), limVAPs())
-	if want := []PFLimit{{"wlan11", 2000}, {"wlan21", 2000}}; !reflect.DeepEqual(got, want) {
+	if want := []PFLimit{{VAP: "wlan11", DownKbps: 2000}, {VAP: "wlan21", DownKbps: 2000}}; !reflect.DeepEqual(got, want) {
 		t.Errorf("limits = %v, want %v", got, want)
 	}
 	if len(notes) != 2 {
@@ -80,7 +80,7 @@ qos.vap.2.dwnlink.maxspeed=2000
 }
 
 func TestAirPortLimitsScript(t *testing.T) {
-	s, err := AirPortLimitsScript([]PFLimit{{"wlan11", 2000}, {"wlan21", 5000}})
+	s, err := AirPortLimitsScript([]PFLimit{{VAP: "wlan11", DownKbps: 2000}, {VAP: "wlan21", DownKbps: 5000}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,13 +98,13 @@ func TestAirPortLimitsScript(t *testing.T) {
 		name string
 		l    []PFLimit
 	}{
-		{"wlan9", []PFLimit{{"wlan9", 100}}},
-		{"firmware VAP", []PFLimit{{"wlan0", 100}}},
-		{"injection", []PFLimit{{"wlan11;reboot", 100}}},
-		{"zero", []PFLimit{{"wlan11", 0}}},
-		{"negative", []PFLimit{{"wlan11", -5}}},
-		{"over 1 Gbit", []PFLimit{{"wlan11", 1000000}}},
-		{"twice", []PFLimit{{"wlan11", 1}, {"wlan11", 2}}},
+		{"wlan9", []PFLimit{{VAP: "wlan9", DownKbps: 100}}},
+		{"firmware VAP", []PFLimit{{VAP: "wlan0", DownKbps: 100}}},
+		{"injection", []PFLimit{{VAP: "wlan11;reboot", DownKbps: 100}}},
+		{"zero", []PFLimit{{VAP: "wlan11", DownKbps: 0}}},
+		{"negative", []PFLimit{{VAP: "wlan11", DownKbps: -5}}},
+		{"over 1 Gbit", []PFLimit{{VAP: "wlan11", DownKbps: 1000000}}},
+		{"twice", []PFLimit{{VAP: "wlan11", DownKbps: 1}, {VAP: "wlan11", DownKbps: 2}}},
 	} {
 		if s, err := AirPortLimitsScript(tc.l); err == nil {
 			t.Errorf("%s: accepted:\n%s", tc.name, s)
@@ -295,7 +295,7 @@ func (h *pfHost) runPFG(lims []PFLimit, iso []PFIso, g PFGuest) (report []string
 
 func TestAirPortLimitsRun(t *testing.T) {
 	h := newPFHost(t)
-	two := []PFLimit{{"wlan11", 2000}, {"wlan21", 5000}}
+	two := []PFLimit{{VAP: "wlan11", DownKbps: 2000}, {VAP: "wlan21", DownKbps: 5000}}
 	wantRules := "altq on wlan11 hfsc bandwidth 1Gb queue { lim_wlan11 }\n" +
 		"queue lim_wlan11 bandwidth 2000Kb hfsc(default upperlimit 2000Kb)\n" +
 		"altq on wlan21 hfsc bandwidth 1Gb queue { lim_wlan21 }\n" +
@@ -361,7 +361,7 @@ func TestAirPortLimitsRun(t *testing.T) {
 		}
 	})
 	t.Run("a limit changes", func(t *testing.T) {
-		rep, _ := h.run([]PFLimit{{"wlan11", 3000}, {"wlan21", 5000}})
+		rep, _ := h.run([]PFLimit{{VAP: "wlan11", DownKbps: 3000}, {VAP: "wlan21", DownKbps: 5000}})
 		if len(rep) != 1 || !strings.Contains(h.text("run/pf.conf"), "3000Kb") {
 			t.Errorf("report %q", rep)
 		}

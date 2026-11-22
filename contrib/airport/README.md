@@ -307,7 +307,7 @@ configuration file. Four states, and the third column says what was and was not 
 | Schedules | works | The daemon leaves a WLAN out of the VAP list outside its hours, in the time zone the controller sent, and applies again when a boundary passes. Seen: a window that excluded the current time took both VAPs of the lab WLAN off within a minute, and removing the schedule brought them back. With no readable time zone the WLANs stay on |
 | Download limit (user group) | works | A cap on the WLAN's VAP, shared by the WLAN's clients: none gets more than the limit, and each gets less when several are active. An `altq` hfsc queue with every packet in its default class, loaded through `pf` (see [pf](#pf)). A user group of 2000 kbit/s gave 221753 B/s, 1.77 Mbit/s, from the console; asked by hand 2 Mbit gave 1.76, and an unlimited wired client kept its 10 MB/s. A limit of 1 Gbit/s or more is not applied |
 | Download limit per client | not possible | Classifying one client's download leaks about half the bytes: 2 Mbit asked gave 3.85, 1 Mbit gave 1.57, steadily. Frames arrive from the mesh uplink aggregated (about 3 KB per packet in `pfctl -ss -v`); when one is split for the VAP the tag `pf` put on it stays on the first segment only, and the second falls in the default class. No `pf` rule changes that |
-| Upload limit | not done | Ignored with a note (3.5 MB/s measured with a limit set). Per client it classifies well (1 Mbit asked, 0.94 delivered) but needs a queue on the uplink, and any queue on the mesh uplink slows everybody: an unlimited wired client fell from 9.7 to 5.3 MB/s with hfsc and to 2.3 with cbq. On a wired uplink (a queue on the Ethernet port) it was not tried |
+| Upload limit | works on a VLAN | A WLAN on a VLAN: a cap on `vlanN` (pf altq), the interface only that VLAN's WLANs leave by, shared by their clients. Measured on a wired uplink: a 400 kbit/s cap gave 49998 B/s; with the console's 1 Mbit/s the queue is loaded and the upload stays under it. A WLAN on the LAN: ignored with a note, it has no interface of its own on the way out (a queue on `bcmeth0` cut the unit off the network until the wireless uplink took over). Per client: not possible. |
 | **Device** | | |
 | Restart | works | The VAPs are rebuilt from the saved configuration when the unit is back |
 | Locate | works | From the console the LED alternates amber and green every second, and goes back |
@@ -491,8 +491,7 @@ cable in never joined the mesh, and the 5 GHz WLANs took a channel of their own 
 the switch port disabled the unit joined the mesh 20 s later, the 5 GHz WLANs moved to the
 parent's channel and the VLAN was made again on the wireless uplink within 90 s; with the port
 enabled again the gateway test passed in 16 s, the wireless uplink went, and the VLAN was back
-on the wire 30 s after that. Not tested: a wire with link whose gateway stops answering (the
-45 s rule); the parent changing
+on the wire 30 s after that. A wire with link whose gateway stopped answering (the switch port moved to an empty VLAN): the unit joined the mesh about two minutes later (that run counted 45 s of looks, now five looks), and with the port back it left the mesh 8 s later, 2 pings in 120 lost on the network. In that state (dead wire, mesh up) 1 ping in 120 to the unit was lost once it had settled. the parent changing
 channel; an open WLAN and a hidden one through the console; any other AirPort model; a
 parent that is not a UniFi AP.
 

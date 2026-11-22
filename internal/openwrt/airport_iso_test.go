@@ -79,7 +79,7 @@ func TestAirPortPFScriptRefusesAll(t *testing.T) {
 
 func TestAirPortPFScriptShape(t *testing.T) {
 	iso := []PFIso{{"wlan12", "bridge77"}, {"wlan21", "bridge77"}, {"wlan22", "bridge0"}}
-	s, err := AirPortPFScript([]PFLimit{{"wlan11", 2000}}, iso, pfAll)
+	s, err := AirPortPFScript([]PFLimit{{VAP: "wlan11", DownKbps: 2000}}, iso, pfAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestAirPortPFScriptShape(t *testing.T) {
 		t.Error("block lines are not after pass all")
 	}
 	// only the daemon's VAPs, its own bridges and no uplink
-	for _, bad := range []string{"wlan0", "wlan3", "wlan5", "wlan9", "vlan", "wlan1?.ipf", "reboot"} {
+	for _, bad := range []string{"wlan0", "wlan3", "wlan5", "wlan9", "bcmeth", "wlan1?.ipf", "reboot"} {
 		if strings.Contains(s, bad) {
 			t.Errorf("script mentions %q", bad)
 		}
@@ -137,7 +137,7 @@ func tagRules(running ...string) string {
 // the tagging of every running VAP and the four rules of each isolated one, in
 // that order.
 func TestAirPortPFRuleset(t *testing.T) {
-	lim := []PFLimit{{"wlan11", 2000}}
+	lim := []PFLimit{{VAP: "wlan11", DownKbps: 2000}}
 	iso := []PFIso{{"wlan12", "bridge77"}, {"wlan21", "bridge77"}}
 	limRules := "altq on wlan11 hfsc bandwidth 1Gb queue { lim_wlan11 }\n" +
 		"queue lim_wlan11 bandwidth 2000Kb hfsc(default upperlimit 2000Kb)\n"

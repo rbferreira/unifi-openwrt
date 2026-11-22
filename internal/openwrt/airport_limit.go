@@ -17,23 +17,33 @@ import (
 // per client does not work for the download (pf sees frames the mesh uplink
 // aggregated, and half the bytes leave the class), and one for the upload needs
 // a queue on the uplink, which slows every client. So the download limit is a
-// cap on the WLAN's VAP, shared by its clients, and the upload limit is noted
-// as not applied.
+// cap on the WLAN's VAP, shared by its clients.
+//
+// The upload of a WLAN on a VLAN leaves by vlanN, an interface only that VLAN's
+// WLANs use, and a queue there costs nobody else (measured on a wired uplink: a
+// 400 kbit/s cap gave 49998 B/s). So that upload limit is a cap on vlanN, shared
+// by the clients of every WLAN on the VLAN. A WLAN on the LAN has no interface
+// of its own on the way out (a queue on bcmeth0 cut the unit off the network,
+// measured), and its upload limit is noted as not applied.
 
 // apPFMaxKbps is the parent queue's bandwidth (1Gb): a child may not ask for
 // more, and a cap that high is no cap on this unit's radios anyway.
 const apPFMaxKbps = 1000000
 
-// PFLimit is the download cap of one VAP.
+// PFLimit is the download cap of one VAP (VAP, DownKbps), or the upload cap of
+// one VLAN (VAP empty, VLAN, UpKbps).
 type PFLimit struct {
 	VAP      string // wlan10..17, wlan20..27
 	DownKbps int
+	VLAN     int // 2..4094: the cap goes on vlanN
+	UpKbps   int
 }
 
 // AirPortLimits maps the controller's rate limits to the VAPs of the last apply
 // (by the controller's devname, VAP.Devname) and returns the caps to set, in
-// the order of vaps, with the notes for the log: once for the shared download
-// limit, once for the upload limits that are ignored.
+// the order of vaps, then the upload caps by VLAN, with the notes for the log:
+// once for the shared download limit, once for the upload caps, once for the
+// upload limits that are ignored.
 func AirPortLimits(lims []translate.VAPLimit, vaps []AirPortVAP) ([]PFLimit, []string) {
 	byDev := map[string]AirPortVAP{}
 	for _, v := range vaps {
@@ -43,6 +53,7 @@ func AirPortLimits(lims []translate.VAPLimit, vaps []AirPortVAP) ([]PFLimit, []s
 	}
 	down := map[string]int{} // VAP -> kbps, the lowest when a devname has two
 	upSSID := map[string]bool{}
+	up := map[int]int{} // VLAN -> kbps, the lowest of its WLANs
 	var notes, noVAP, tooBig []string
 	for _, l := range lims {
 		v, ok := byDev[l.Devname]
@@ -50,8 +61,13 @@ func AirPortLimits(lims []translate.VAPLimit, vaps []AirPortVAP) ([]PFLimit, []s
 			noVAP = append(noVAP, l.Devname)
 			continue
 		}
-		if l.UpKbps > 0 {
+		switch {
+		case l.UpKbps <= 0:
+		case v.VLAN == 0:
 			upSSID[fmt.Sprintf("%q", v.SSID)] = true
+		case l.UpKbps >= apPFMaxKbps:
+		case up[v.VLAN] == 0 || l.UpKbps < up[v.VLAN]:
+			up[v.VLAN] = l.UpKbps
 		}
 		switch {
 		case l.DownKbps <= 0:
@@ -70,8 +86,19 @@ func AirPortLimits(lims []translate.VAPLimit, vaps []AirPortVAP) ([]PFLimit, []s
 	if len(out) > 0 {
 		notes = append(notes, "download limit: a cap on the WLAN's VAP (pf altq), shared by its clients: none gets more than the limit, and each gets less when several are active")
 	}
+	var ids []int
+	for id := range up {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	for _, id := range ids {
+		out = append(out, PFLimit{VLAN: id, UpKbps: up[id]})
+	}
+	if len(ids) > 0 {
+		notes = append(notes, "upload limit: a cap on the VLAN's interface (pf altq on vlanN), shared by the clients of every WLAN on that VLAN")
+	}
 	if len(upSSID) > 0 {
-		notes = append(notes, fmt.Sprintf("upload limit ignored on WLAN(s) %s: a per-client upload limit needs a queue on the uplink, which slows every client", sortedKeys(upSSID)))
+		notes = append(notes, fmt.Sprintf("upload limit ignored on WLAN(s) %s: it needs a queue on an interface only that WLAN's traffic leaves by, and only a WLAN on a VLAN has one", sortedKeys(upSSID)))
 	}
 	if len(tooBig) > 0 {
 		sort.Strings(tooBig)
@@ -199,6 +226,16 @@ lim() {
 	n=$((n + 1))
 	w="$w $1"
 }
+# ulim VLANIF RATE: the upload cap of the WLANs on that VLAN, a queue on vlanN
+nu=0
+ulim() {
+	ifconfig $1 >/dev/null 2>&1 || return
+	echo "altq on $1 hfsc bandwidth 1Gb queue { up_$1 }" >> $T
+	echo "queue up_$1 bandwidth $2 hfsc(default upperlimit $2)" >> $T
+	n=$((n + 1))
+	nu=$((nu + 1))
+	w="$w $1"
+}
 m=0
 wi=
 wb=
@@ -265,7 +302,7 @@ const apPFTail = `if [ $n -eq 0 ] && [ $m -eq 0 ]; then
 	if [ -e $F ]; then
 		pfctl -d >/dev/null 2>&1
 		pfctl -F all >/dev/null 2>&1
-		rm -f $F $D/wlan1?.pfq $D/wlan2?.pfq
+		rm -f $F $D/wlan1?.pfq $D/wlan2?.pfq $D/vlan[0-9]*.pfq
 		echo "pf: off"
 	fi
 	exit 0
@@ -304,17 +341,18 @@ if ! r=$(pfctl -f $T 2>&1); then
 	exit 0
 fi
 mv $T $F
-rm -f $D/wlan1?.pfq $D/wlan2?.pfq
+rm -f $D/wlan1?.pfq $D/wlan2?.pfq $D/vlan[0-9]*.pfq
 for v in $w $wi $ws; do : > $D/$v.pfq; done
 if ! r=$(pfctl -e 2>&1); then
 	case "$r" in
 	*"already enabled"*) ;;
-	*) echo "pf failed: enable: $(echo "$r" | sed -n 1p)"; rm -f $D/wlan1?.pfq $D/wlan2?.pfq; exit 0;;
+	*) echo "pf failed: enable: $(echo "$r" | sed -n 1p)"; rm -f $D/wlan1?.pfq $D/wlan2?.pfq $D/vlan[0-9]*.pfq; exit 0;;
 	esac
 fi
 brsync
 s=
-[ $n -gt 0 ] && s="$n limited VAP(s)"
+[ $n -gt $nu ] && s="$((n - nu)) limited VAP(s)"
+[ $nu -gt 0 ] && s="${s:+$s, }$nu VLAN upload cap(s)"
 [ $m -gt 0 ] && s="${s:+$s, }$m isolated VAP(s)"
 echo "pf: $s"
 exit 0
@@ -356,7 +394,21 @@ func AirPortPFScriptGuest(lims []PFLimit, iso []PFIso, all []string, g PFGuest) 
 	var b strings.Builder
 	b.WriteString(apPFHead)
 	seen := map[string]bool{}
+	seenUp := map[int]bool{}
 	for _, l := range lims {
+		if l.VAP == "" {
+			switch {
+			case l.VLAN < apMinVLAN || l.VLAN > apMaxVLAN:
+				return "", fmt.Errorf("refusing VLAN %d for an upload cap", l.VLAN)
+			case seenUp[l.VLAN]:
+				return "", fmt.Errorf("VLAN %d twice", l.VLAN)
+			case l.UpKbps <= 0 || l.UpKbps >= apPFMaxKbps:
+				return "", fmt.Errorf("vlan%d: refusing rate %d kbit/s", l.VLAN, l.UpKbps)
+			}
+			seenUp[l.VLAN] = true
+			fmt.Fprintf(&b, "ulim vlan%d %dKb\n", l.VLAN, l.UpKbps)
+			continue
+		}
 		switch {
 		case !apVAPName.MatchString(l.VAP):
 			return "", fmt.Errorf("refusing VAP name %q", l.VAP)

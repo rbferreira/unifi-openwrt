@@ -31,17 +31,17 @@ with what was measured on the unit for each item below.
 |---|---|
 | WLANs | open and WPA2 personal, up to 8 per band, hidden SSID, enable and disable, schedules |
 | Radios | channel on both bands (automatic channel chosen from a neighbour scan), transmit power, 20/40/80 MHz on 5 GHz when the uplink is not wireless, DTIM, client limit |
-| Networks | WLANs on a VLAN (over the mesh uplink), guest WLANs without the captive portal with the console's restricted ranges |
-| Clients | block and unblock, reconnect, minimum RSSI, MAC filter (allow and deny lists, clients locked to another AP), client isolation, download limit per WLAN |
+| Networks | WLANs on a VLAN (over the mesh uplink or a cable), guest WLANs without the captive portal with the console's restricted ranges |
+| Clients | block and unblock, reconnect, minimum RSSI, MAC filter (allow and deny lists, clients locked to another AP), client isolation, download limit per WLAN, upload limit per VLAN |
 | Reported | radios, WLANs, clients with signal, rates and counters, the wireless uplink and its parent, all ports, neighbouring networks, 802.11k neighbour lists, firmware and country |
-| Device | adoption, restart, locate (the LED alternates its two colours), remote syslog, mesh uplink credentials kept in step with the console, the WLANs back at boot before the console is reached |
+| Device | adoption, wired or mesh uplink (it changes over by itself when the cable stops or starts reaching the gateway), restart, locate (the LED alternates its two colours), remote syslog, mesh uplink credentials kept in step with the console, the WLANs back at boot before the console is reached |
 
 **What it does not do**
 
 | | |
 |---|---|
 | The radio driver cannot | WPA3 and WPA2/WPA3, protected management frames, 802.11r, 802.11v, channel utilization, 40 MHz on 2.4 GHz |
-| Not possible on this unit | captive portal and guest authorisation, per-client and upload rate limits, serving mesh children, LED off, temperatures in the console |
+| Not possible on this unit | captive portal and guest authorisation, per-client rate limits, an upload limit for a WLAN on the LAN, serving mesh children, LED off, temperatures in the console |
 | Follows the mesh uplink | the 5 GHz channel and width while the uplink is wireless |
 | Not done yet | device logins, SNMP, NTP and time zone from the console |
 | Written, not tested yet | guests with a wired uplink, band steering (prefer 5 GHz), guest WLANs on the native LAN |

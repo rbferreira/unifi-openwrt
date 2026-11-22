@@ -177,6 +177,7 @@ mkvlan() {
 		msg="$vl created"
 	fi
 	ifconfig $vl create >/dev/null 2>&1 || return 1
+	rm -f $D/$vl.pfq # a new interface has no queue: pf loads its ruleset again
 	own $vl
 	if ifconfig $vl vlan $1 vlanif $2 >/dev/null 2>&1 && ifconfig $vl up >/dev/null 2>&1; then
 		echo "$msg"

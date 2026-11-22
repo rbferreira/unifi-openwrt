@@ -197,26 +197,33 @@ if [ -n "$(pids /usr/sbin/dhcpd)" ]; then say "dhcpd running (router mode): upli
 cp $D/wpa_supplicant $M/wpa_supplicant; chmod 755 $M/wpa_supplicant
 uow_unpack && HAVE_UOW=1 || HAVE_UOW=0
 
-lost=20; meshing=0; bad=0; upc=; nolink=1; tick=0; dead=0
+lost=20; meshing=0; bad=0; upc=; nolink=1; tick=0; dead=0; gwait=0
 while :; do
 	if wan; then
 		lost=0
 		if [ $meshing = 1 ]; then
 			# Looked at when the cable goes in (3 tries), when the bridge sees the gateway on the
-			# wired side (at most every 15 s), and once a minute (1 try, at most 2 s without the uplink).
+			# wired side (every pass; 15 s after such a look found nothing), and once a minute (1 try,
+			# at most 2 s without the uplink). A wire that comes alive while the wireless uplink is
+			# up is a loop until the next look, so the bridge is read every pass.
 			tick=$((tick + 5)); n=0
 			[ $nolink = 1 ] && n=3
-			[ $n = 0 ] && [ $tick -ge 15 ] && gwonwire && n=2
+			[ $n = 0 ] && [ $tick -ge $gwait ] && gwonwire && n=2
 			[ $n = 0 ] && [ $tick -ge 60 ] && n=1
 			if [ $n != 0 ]; then
 				tick=0
-				if probe $n; then leave "cable on the WAN port reaches the gateway"; meshing=0; dead=0; led 2
-				elif [ $nolink = 1 ]; then say "cable on the WAN port does not reach the gateway: wireless uplink kept"; fi
+				was2=$n
+				if probe $n; then leave "cable on the WAN port reaches the gateway"; meshing=0; dead=0; gwait=0; led 2
+				else
+					[ $nolink = 1 ] && say "cable on the WAN port does not reach the gateway: wireless uplink kept"
+					[ $was2 = 2 ] && gwait=15 || gwait=0
+				fi
 			fi
 		else
-			# on the wire: a gateway silent for 45 s brings the wireless uplink back
+			# on the wire: a gateway that misses five looks in a row (about 45 s: a look that
+			# fails takes 2 s more) brings the wireless uplink back
 			if gwping; then dead=0; else dead=$((dead + 5)); fi
-			[ $dead -ge 45 ] && { say "cable on the WAN port, gateway silent for 45 s"; lost=20; dead=0; }
+			[ $dead -ge 25 ] && { say "cable on the WAN port, gateway silent for 45 s"; lost=20; dead=0; }
 		fi
 		nolink=0
 	else
