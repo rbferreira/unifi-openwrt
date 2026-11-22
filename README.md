@@ -44,7 +44,7 @@ with what was measured on the unit for each item below.
 | Not possible on this unit | captive portal and guest authorisation, per-client and upload rate limits, serving mesh children, LED off, temperatures in the console |
 | Follows the mesh uplink | the 5 GHz channel and width while the uplink is wireless |
 | Not done yet | device logins, SNMP, NTP and time zone from the console |
-| Written, not tested yet | guests with a wired uplink, going back to the mesh when the cable comes out, band steering (prefer 5 GHz), guest WLANs on the native LAN |
+| Written, not tested yet | guests with a wired uplink, band steering (prefer 5 GHz), guest WLANs on the native LAN |
 
 Other AirPort models are not covered. The backend needs a Go toolchain patched for the unit's
 NetBSD 6 kernel ([contrib/airport/go](contrib/airport/go/README.md)); the OpenWrt side builds
