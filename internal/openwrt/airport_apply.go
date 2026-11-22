@@ -460,7 +460,7 @@ stop() {
 		while alive $1 && [ $n -lt 5 ]; do sleep 1; n=$((n + 1)); done
 		alive $1 && kill -9 $(cat $D/$1.pid) 2>/dev/null
 	fi
-	rm -f $D/$1.pid $D/$1.acl $D/$1.pfq # a VAP made again starts with an empty driver ACL and no altq
+	rm -f $D/$1.pid $D/$1.acl $D/$1.pfq $D/$1.nbr # a VAP made again starts with an empty driver ACL, no altq and no neighbours
 	unbridge $1 -
 	ifconfig $1 destroy >/dev/null 2>&1
 }
@@ -482,7 +482,7 @@ ok() {
 # (the config has the channel of the mesh uplink, which alone tunes the radio).
 start() {
 	v=$1
-	rm -f $D/$v.acl $D/$v.pfq
+	rm -f $D/$v.acl $D/$v.pfq $D/$v.nbr
 	ifconfig $v create wlandev $2 wlanmode hostap >/dev/null 2>&1 || { echo "$v failed: ifconfig create"; rm -f $D/$v.new; return; }
 	case $3 in auto|-) ;; *) ifconfig $v channel $3 >/dev/null 2>&1;; esac
 	mv $D/$v.new $D/$v.want

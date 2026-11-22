@@ -880,6 +880,7 @@ func airportKeep(ap *openwrt.Client) {
 // bridge's other members, so a bad Wi-Fi config cannot cut the daemon off.
 func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 	airportCfgPath, airportApply = cfgPath, apply
+	scans.setApply(apply)
 	cfg, err := os.ReadFile(cfgPath)
 	if err != nil {
 		log.Printf("plan: %v", err)
@@ -979,6 +980,8 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 			down = append(down, v.Name)
 		}
 	}
+	scans.setSnap(snap) // the new VAPs get their neighbour lists on this loop, not the next inform's
+	scans.rrmSoon()
 	log.Printf("after apply: %d of %d wanted VAP(s) running", up, len(vaps))
 	if len(down) > 0 {
 		log.Printf("  not running: %v", down)

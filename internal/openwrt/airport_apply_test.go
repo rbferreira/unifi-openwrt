@@ -1158,7 +1158,11 @@ done
 	// wl -i VAP assoclist: the stations the test wrote to state/assoc/VAP
 	"wl": `#!/bin/sh
 [ "$1" = -i ] && v=$2 && shift 2
-[ "$1" = assoclist ] && cat $STUB_STATE/assoc/$v 2>/dev/null
+case "$1" in
+assoclist) cat $STUB_STATE/assoc/$v 2>/dev/null;;
+rrm_nbr_add_nbr) [ -e $STUB_STATE/fail/nbr ] && exit 1; echo "$v $*" >> $STUB_STATE/ctl;;
+rrm_nbr_del_nbr) echo "$v $*" >> $STUB_STATE/ctl;;
+esac
 exit 0
 `,
 	// a short real sleep: the script waits for a backgrounded hostapd

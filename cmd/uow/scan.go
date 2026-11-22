@@ -28,6 +28,8 @@ type scanner struct {
 	snap     *openwrt.Snapshot    // last AP reading (from the inform)
 	lastRRM  time.Time
 	rrmErr   string
+	apply    bool   // AirPort: -apply is on (otherwise the neighbour lists are only logged)
+	apNbrKey string // AirPort: the last lists logged without -apply
 }
 
 var scans = &scanner{results: map[string]openwrt.ScanResult{}}
@@ -178,7 +180,7 @@ func (sc *scanner) scanAirPort(ap *openwrt.Client, force bool) {
 func (sc *scanner) background(ap *openwrt.Client) {
 	sc.mu.Lock()
 	due := !sc.running && time.Since(sc.lastBG) >= bgScanEvery
-	rrmDue := !sc.running && time.Since(sc.lastRRM) >= 5*time.Minute && !ap.IsAirPort()
+	rrmDue := !sc.running && time.Since(sc.lastRRM) >= 5*time.Minute
 	sc.mu.Unlock()
 	if due {
 		sc.start(ap, false, false)
@@ -190,6 +192,10 @@ func (sc *scanner) background(ap *openwrt.Client) {
 // syncRRM puts the sibling APs found by the scans into each AP interface's
 // 802.11k neighbour list (docs/internals.md); hostapd forgets it on restart.
 func (sc *scanner) syncRRM(ap *openwrt.Client) {
+	if ap.IsAirPort() {
+		sc.syncAirPortRRM(ap)
+		return
+	}
 	sc.mu.Lock()
 	s := sc.snap
 	var res []openwrt.ScanResult
@@ -230,6 +236,72 @@ func (sc *scanner) syncRRM(ap *openwrt.Client) {
 		log.Printf("802.11k: %s", e)
 	}
 	sc.rrmErr = e
+	sc.mu.Unlock()
+}
+
+// syncAirPortRRM does the same on the AirPort, where the driver keeps the list
+// of each VAP (openwrt.AirPortNbrSets): the VAPs are the ones the last reading
+// shows. Without -apply it only logs what it would list, when that changes.
+func (sc *scanner) syncAirPortRRM(ap *openwrt.Client) {
+	sc.mu.Lock()
+	s, apply := sc.snap, sc.apply
+	var res []openwrt.ScanResult
+	for _, r := range sc.results {
+		res = append(res, r)
+	}
+	sc.lastRRM = time.Now()
+	sc.mu.Unlock()
+	if s == nil || len(res) == 0 {
+		return
+	}
+	sets := openwrt.AirPortNbrSets(s, res)
+	if !apply {
+		var b strings.Builder
+		for _, st := range sets {
+			b.WriteString(st.VAP + ":")
+			for _, n := range st.Nbrs {
+				b.WriteString(" " + n.Arg())
+			}
+			b.WriteByte('\n')
+		}
+		sc.mu.Lock()
+		changed := b.String() != sc.apNbrKey
+		sc.apNbrKey = b.String()
+		sc.mu.Unlock()
+		if changed {
+			for _, st := range sets {
+				log.Printf("802.11k (log-only, not applied): %s (%s) would list %d BSS", st.VAP, st.SSID, len(st.Nbrs))
+			}
+		}
+		return
+	}
+	lines, err := ap.SyncAirPortNeighbors(sets)
+	for _, l := range lines {
+		log.Printf("  airport: %s", l)
+	}
+	e := ""
+	if err != nil {
+		e = err.Error()
+	}
+	sc.mu.Lock()
+	if e != sc.rrmErr && e != "" {
+		log.Printf("802.11k: %s", e)
+	}
+	sc.rrmErr = e
+	sc.mu.Unlock()
+}
+
+// setSnap replaces the last AP reading with a newer one (after an apply).
+func (sc *scanner) setSnap(s *openwrt.Snapshot) {
+	sc.mu.Lock()
+	sc.snap = s
+	sc.mu.Unlock()
+}
+
+// setApply remembers whether the daemon applies what it plans (AirPort).
+func (sc *scanner) setApply(apply bool) {
+	sc.mu.Lock()
+	sc.apply = apply
 	sc.mu.Unlock()
 }
 
