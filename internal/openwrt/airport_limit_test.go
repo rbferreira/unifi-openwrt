@@ -161,6 +161,20 @@ esac
 exit 0
 `
 
+// brconfig keeps the packet filter flag of a bridge in $S/ipf.NAME (a bridge
+// that is not "up" does not exist: ifconfig fails first); its calls go to
+// $S/brlog, apart from pfctl's.
+const pfStubBrconfig = `echo "brconfig $*" >> $S/brlog
+b=$1
+case "$2" in
+ipf) [ -e $S/failipf ] && { echo "brconfig: no" >&2; exit 1; }; : > $S/ipf.$b;;
+-ipf) [ -e $S/failipf ] && { echo "brconfig: no" >&2; exit 1; }; rm -f $S/ipf.$b;;
+*) echo "$b: flags=41<UP,RUNNING>"
+	if [ -e $S/ipf.$b ]; then echo "	ipfilter enabled flags 0x3"; else echo "	ipfilter disabled flags 0x2"; fi;;
+esac
+exit 0
+`
+
 // pfHost runs the limits script against a fake ifconfig and pfctl.
 type pfHost struct {
 	t       *testing.T
@@ -185,7 +199,7 @@ func newPFHost(t *testing.T) *pfHost {
 			t.Fatal(err)
 		}
 	}
-	for name, body := range map[string]string{"ifconfig": pfStubIfconfig, "pfctl": pfStubPfctl} {
+	for name, body := range map[string]string{"ifconfig": pfStubIfconfig, "pfctl": pfStubPfctl, "brconfig": pfStubBrconfig} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -237,7 +251,13 @@ func (h *pfHost) text(rel string) string {
 // run returns the report lines and the pfctl calls this run made.
 func (h *pfHost) run(lims []PFLimit) (report []string, pfctl []string) {
 	h.t.Helper()
-	s, err := AirPortLimitsScript(lims)
+	return h.runPF(lims, nil)
+}
+
+// runPF is run with isolated VAPs too.
+func (h *pfHost) runPF(lims []PFLimit, iso []PFIso) (report []string, pfctl []string) {
+	h.t.Helper()
+	s, err := AirPortPFScript(lims, iso)
 	if err != nil {
 		h.t.Fatal(err)
 	}

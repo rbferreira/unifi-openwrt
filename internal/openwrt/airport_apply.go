@@ -535,6 +535,7 @@ radio() {
 # iso VAP FLAG: client isolation is the driver's AP bridging: "-apbridge" keeps
 # the stations of the VAP apart, "apbridge" lets them talk (measured: wl
 # ap_isolate reads 1 and 0). Set every time, on every VAP: it costs one call.
+# It isolates within one VAP only; across the radios pf does it (airport_limit.go).
 iso() {
 	ifconfig $1 $2 >/dev/null 2>&1
 }
