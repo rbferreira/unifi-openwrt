@@ -486,8 +486,13 @@ model), and `uow -dump`, `owctl`, `owplan` and `owprobe` against the unit.
 Seen with a cable on the WAN port that led nowhere: the earlier `up.sh` dropped the wireless
 uplink on link alone and the unit was cut off until the cable came out, which is why the
 gateway test exists. Taking the uplink out of the bridge and putting it back was measured by
-hand (no new association). Not tested: the gateway test itself with a cable, a working wired
-uplink (the wired-uplink branch of `up.sh` as a whole, and so the 5 GHz radio with no uplink on a real unit rather than by hand); the parent changing
+hand (no new association). Seen with a cable from a switch to the WAN port: power-on with the
+cable in never joined the mesh, and the 5 GHz WLANs took a channel of their own at 80 MHz; with
+the switch port disabled the unit joined the mesh 20 s later, the 5 GHz WLANs moved to the
+parent's channel and the VLAN was made again on the wireless uplink within 90 s; with the port
+enabled again the gateway test passed in 16 s, the wireless uplink went, and the VLAN was back
+on the wire 30 s after that. Not tested: a wire with link whose gateway stops answering (the
+45 s rule); the parent changing
 channel; an open WLAN and a hidden one through the console; any other AirPort model; a
 parent that is not a UniFi AP.
 
