@@ -220,6 +220,9 @@ type Snapshot struct {
 	Firmware, Country string
 	// Thermal: board temperatures and the fan (AirPort: envstat).
 	Thermal Thermal
+	// PortsOrdered: Ports is the platform's own order of the jacks (AirPort:
+	// the WAN jack first), to be reported as it is, not with the uplink first.
+	PortsOrdered bool
 }
 
 // FDBEntry is one row of the br-lan forwarding database
@@ -276,7 +279,9 @@ type Station struct {
 }
 
 type Port struct {
-	Name, MAC        string
+	Name, MAC string
+	Label     string // what the jack is called when the platform knows ("WAN", "LAN 1"); "" = the port_table names it
+
 	Speed            int
 	FullDuplex, Up   bool
 	RxBytes, TxBytes int64

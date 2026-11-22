@@ -84,6 +84,7 @@ func main() {
 		apHost = h
 	}
 	log.SetFlags(log.Ldate | log.Ltime)
+	log.SetOutput(syslogTap) // stderr as before; a copy for the AirPort's remote syslog while it is on
 	if *listModels {
 		for _, m := range models.All() {
 			fmt.Println(m)
@@ -108,7 +109,11 @@ func main() {
 		if err := os.WriteFile(*dump, b, 0o600); err != nil {
 			log.Fatal(err)
 		}
-		if s, err := openwrt.Parse(b, time.Now()); err != nil {
+		parse := openwrt.Parse
+		if *apPlatform == openwrt.PlatformAirPort {
+			parse = openwrt.ParseAirPort
+		}
+		if s, err := parse(b, time.Now()); err != nil {
 			fmt.Printf("wrote %s (the daemon cannot read this AP: %v)\n", *dump, err)
 		} else {
 			fmt.Printf("wrote %s: %q, %s, %d radios, %d ports\n", *dump, s.Model, s.Release, len(s.Radios), len(s.Ports))
@@ -203,7 +208,12 @@ func main() {
 			log.Fatal(err)
 		}
 	}
-	if *apAddr == "local" { // the daemon runs on the AP: logread is ours
+	switch {
+	case ap != nil && ap.IsAirPort():
+		// no logread and no syslogd on the base station: the daemon sends its own
+		// log and the hostapd logs of its VAPs (airport_syslog.go)
+		go airportSyslog(x, ap, *stateDir)
+	case *apAddr == "local": // the daemon runs on the AP: logread is ours
 		go syslogForwarder(x, *stateDir)
 	}
 	if portalListen != "" {
@@ -265,6 +275,9 @@ func main() {
 			}
 			shapeReconcile(ap, s)
 			minRSSIKick(ap.Kick, s)
+			if ap.IsAirPort() {
+				airportSteerPass(ap, s)
+			}
 			f := s.Fields(prev, info, radioCaps)
 			scans.fields(f, s, info)
 			prev = s
@@ -731,6 +744,10 @@ var (
 	airportVAPs    []openwrt.AirPortVAP // with their MAC filter, isolation and power
 	airportUplink5 int
 	airportChecked time.Time
+	// what the controller asked for before the daemon's own choices (schedules,
+	// automatic channels), and the schedule answer the VAPs were made for
+	airportWanted   translate.Wanted
+	airportSchedKey string
 	// the controller's blocked clients (set on every pass of the main loop) and
 	// the list the driver ACLs were last synced with
 	airportBlocked []string
@@ -769,7 +786,14 @@ func airportKeep(ap *openwrt.Client) {
 	if !airportApply || airportCfgPath == "" || time.Since(airportChecked) < time.Minute {
 		return
 	}
-	airportChecked = time.Now()
+	now := time.Now()
+	airportChecked = now
+	// a WLAN schedule boundary has passed (in memory: no call to the unit)
+	if _, _, key := openwrt.AirPortSchedule(airportWanted, now); key != airportSchedKey {
+		log.Printf("airport: a WLAN schedule boundary has passed: applying again")
+		syncAirPort(ap, airportCfgPath, true)
+		return
+	}
 	snap, err := ap.Collect()
 	if err != nil {
 		return
@@ -783,6 +807,11 @@ func airportKeep(ap *openwrt.Client) {
 			why = v.Name + " is not running"
 			break
 		}
+	}
+	if why == "" {
+		// an automatic channel that is due for a second look (an idle radio, the
+		// hold time over, a fresh scan) or has no choice yet and now has a scan
+		why = airportChans.Reconsider(airportWanted, snap, scans.source, airportUplink5, now)
 	}
 	if why == "" {
 		syncAirPortACL(ap, true)
@@ -823,10 +852,14 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 		log.Printf("plan: %s has no radio section (empty or truncated?): nothing applied", cfgPath)
 		return
 	}
-	w := translate.Wifi(parsed, snap.RadioNames())
-	uplink5 := snap.UplinkChannel("na")
-	vaps, notes := openwrt.AirPortVAPs(w, uplink5)
-	notes = append(notes, openwrt.AirPortCountryNotes(w, snap.Country)...)
+	// The schedules and the automatic channels are the daemon's own (airport_*.go
+	// in internal/openwrt); a log-only run does not remember a channel it did not use.
+	chans := &airportChans
+	if !apply {
+		chans = nil
+	}
+	plan := openwrt.PlanAirPort(parsed, snap, time.Now(), chans, scans.source)
+	vaps, uplink5 := plan.VAPs, plan.Uplink5
 	mode := "log-only, not applied"
 	if apply {
 		mode = "applying"
@@ -835,12 +868,16 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 	for _, v := range vaps {
 		log.Printf("  vap %s", v)
 	}
-	for _, n := range append(w.Notes, notes...) {
+	for _, n := range plan.Notes {
+		log.Printf("  note: %s", n)
+	}
+	for _, n := range airportSteerSetup(parsed, string(cfg)) {
 		log.Printf("  note: %s", n)
 	}
 	if !apply {
 		return
 	}
+	airportWanted, airportSchedKey = plan.Wanted, plan.SchedKey
 	airportVAPs, airportUplink5, airportChecked = vaps, uplink5, time.Now()
 	lines, err := ap.ApplyAirPort(vaps)
 	for _, l := range lines {
@@ -1075,19 +1112,7 @@ func syncSteering(ap *openwrt.Client, cfgPath string, apply bool) {
 	}
 	cfg := translate.ParseCfg(string(b))
 	st := translate.BandSteering(cfg)
-	ssidOf := map[string]string{}
-	for k, d := range openwrt.InfoFromCfg(string(b)).DevName {
-		ssid, _, _ := strings.Cut(k, "|")
-		ssidOf[d] = ssid
-	}
-	seen := map[string]bool{}
-	var ssids []string
-	for _, d := range st.Devnames {
-		if s := ssidOf[d]; s != "" && !seen[s] {
-			seen[s] = true
-			ssids = append(ssids, s)
-		}
-	}
+	ssids := steeredSSIDs(string(b), st)
 	if !apply {
 		log.Printf("BANDSTEERING (log-only): mode %q on %v", st.Mode, ssids)
 		return
@@ -1592,16 +1617,9 @@ func minRSSIKick(kick func(mac string) error, s *openwrt.Snapshot) {
 
 // apTarget is how to reach the AP named by -ap and its companion flags.
 func apTarget(addr, user, key, knownHosts, platform, pwFile string) openwrt.Target {
-	t := openwrt.Target{Addr: addr, User: user, KeyFile: key, KnownHosts: knownHosts, Platform: platform}
-	if platform != "" && platform != openwrt.PlatformAirPort {
-		log.Fatalf("unknown -ap-platform %q (empty or %q)", platform, openwrt.PlatformAirPort)
-	}
-	if pwFile != "" {
-		b, err := os.ReadFile(pwFile)
-		if err != nil {
-			log.Fatalf("-ap-password-file: %v", err)
-		}
-		t.Password = strings.TrimRight(string(b), "\r\n")
+	t, err := openwrt.NewTarget(addr, user, key, knownHosts, platform, pwFile)
+	if err != nil {
+		log.Fatalf("-ap-platform / -ap-password-file: %v", err)
 	}
 	return t
 }

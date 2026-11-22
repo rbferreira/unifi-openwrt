@@ -14,6 +14,13 @@ import (
 // replaced (see Scrub): a file a user can attach to a bug report, and that
 // Parse reads like the original.
 func (cl *Client) Dump() ([]byte, error) {
+	if cl.IsAirPort() {
+		out, err := cl.run(airportScript)
+		if err != nil {
+			return nil, err
+		}
+		return AirPortScrub(out), nil // read it back with ParseAirPort
+	}
 	out, err := cl.Run(collectScript)
 	if err != nil {
 		return nil, err

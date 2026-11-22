@@ -16,6 +16,9 @@ type Wanted struct {
 	Radios []WantedRadio
 	WLANs  []WantedWLAN
 	Notes  []string // things left out or approximated, for the log; never a passphrase
+	// Timezone is the site's time zone as the controller wrote it (POSIX TZ
+	// string; see ParseTZ), "" when it sent none. WLAN schedules are read in it.
+	Timezone string
 }
 
 // WantedRadio is one radio.N section.
@@ -55,6 +58,9 @@ type WantedWLAN struct {
 	// maxsta): the controller has no per-WLAN limit, and on OpenWrt the radio's
 	// value goes on every interface of that radio. 0 = no limit asked.
 	MaxClients int
+
+	// Schedule is the WLAN's broadcast schedule, nil when it has none (see WLANOn).
+	Schedule *Schedule
 }
 
 // Wifi reads the controller's Wi-Fi settings out of cfg.
@@ -65,7 +71,7 @@ type WantedWLAN struct {
 // longer exist). With nil the band is Plan's guess from ieee_mode and the
 // radio name, which cannot tell 5 GHz from 6 GHz.
 func Wifi(cfg Cfg, phys map[string]string) Wanted {
-	var w Wanted
+	w := Wanted{Timezone: TimezoneOf(cfg)}
 	have := map[string]bool{} // radio names that made it into w.Radios
 
 	for _, n := range indices(cfg, "radio") {
@@ -191,6 +197,7 @@ func Wifi(cfg Cfg, phys map[string]string) Wanted {
 			}
 		}
 		l.MACPolicy, l.MACs = macACL(cfg, l.Devname)
+		l.Schedule = wlanSchedule(cfg, wp, "wireless."+n)
 		w.WLANs = append(w.WLANs, l)
 	}
 	return w

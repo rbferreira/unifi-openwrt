@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 // owprobe reads an OpenWrt AP once (read-only) and prints the UniFi fields
-// the daemon would send. Client MACs are shortened in the output.
+// the daemon would send. Client MACs are shortened in the output. With
+// -ap-platform airport it does the same for an Apple AirPort base station.
 package main
 
 import (
@@ -21,9 +22,15 @@ func main() {
 	user := flag.String("user", "root", "ssh user")
 	key := flag.String("key", "ap_ed25519", "ssh private key for the AP")
 	kh := flag.String("known-hosts", "ap_known_hosts", "known_hosts file with the AP's host key")
+	platform := flag.String("ap-platform", "", `what the AP is: empty = OpenWrt; "airport" = an Apple AirPort base station`)
+	pwFile := flag.String("ap-password-file", "", "log in with the password in this file instead of the key (AirPort: the admin password)")
 	raw := flag.String("raw", "", "also save the raw collection output here (mode 600)")
 	flag.Parse()
-	cl := openwrt.NewClient(openwrt.Target{Addr: *addr, User: *user, KeyFile: *key, KnownHosts: *kh})
+	t, err := openwrt.NewTarget(*addr, *user, *key, *kh, *platform, *pwFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	cl := openwrt.NewClient(t)
 	defer cl.Close()
 	s1, err := cl.Collect()
 	if err != nil {
@@ -35,7 +42,10 @@ func main() {
 		log.Fatal(err)
 	}
 	if *raw != "" {
-		out, _ := cl.Run(openwrt.CollectScript())
+		out, err := cl.CollectRaw()
+		if err != nil {
+			log.Fatalf("-raw: %v", err)
+		}
 		os.WriteFile(*raw, out, 0o600)
 	}
 	fmt.Printf("model=%q host=%q release=%q mac=%s ip=%s/%s gw=%s uptime=%d radios=%d ports=%d\n",

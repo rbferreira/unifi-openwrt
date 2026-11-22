@@ -70,7 +70,8 @@ var (
 	// ssid "Apple Network 0000aa" channel 136 (5680 Mhz 11a vht/80) bssid ...
 	apIfRE   = regexp.MustCompile(`ssid ("[^"]*"|\S+) channel (\d+) \((\d+) Mhz ([^)]*)\)(?: bssid ([0-9a-fA-F:]{17}))?`)
 	apTxRE   = regexp.MustCompile(`txpower ([0-9.]+)`)
-	apPhyRE  = regexp.MustCompile(`PHY \(0x[0-9A-Fa-f]+\) index (\d+)\s+Link State - Current\s+\(link state ([^)]*)\)`)
+	apPhyHdr = regexp.MustCompile(`PHY \(0x[0-9A-Fa-f]+\) index (\d+)`)
+	apPhyRE  = regexp.MustCompile(`Link State - Current\s+\(link state ([^)]*)\)`)
 	apSpdRE  = regexp.MustCompile(`(\d+)Mbps (Full|Half)`)
 	apPortRE = regexp.MustCompile(`(?m)^\s+(\S+) flags=\S+\s+port (\d+) priority`)
 	apFdbRE  = regexp.MustCompile(`(?m)^\s+([0-9a-f:]{17}) (\S+) (\d+) flags=`)
@@ -209,19 +210,15 @@ func ParseAirPort(out []byte, now time.Time) (*Snapshot, error) {
 		return name
 	}
 
-	// Ethernet: one port per switch PHY (index 0 is the WAN jack). The
-	// switch has one counter set (bcmeth0) and one bridge port for all of
-	// them; they go to the first port with link.
+	// Ethernet: one port per switch PHY, all of them, with or without link (1 WAN
+	// jack and 3 LAN jacks on a Time Capsule A1470), in the order of acpd's own
+	// listing: the WAN jack is PHY index 0, the LAN jacks follow. Link state and
+	// speed come from that listing. The switch has one counter set (bcmeth0) and
+	// one bridge port for all of them: there are no counters per port, so those
+	// go to the first port with link and the others carry none.
 	first := true
-	for _, m := range apPhyRE.FindAllStringSubmatch(string(secs.get("phy")), -1) {
-		idx := int(atoi(m[1]))
-		p := Port{Name: "lan" + strconv.Itoa(idx), MAC: s.MAC}
-		if idx == 0 {
-			p.Name = "wan"
-		}
-		if sp := apSpdRE.FindStringSubmatch(m[2]); sp != nil {
-			p.Up, p.Speed, p.FullDuplex = true, int(atoi(sp[1])), sp[2] == "Full"
-		}
+	for _, ph := range parseAirPortPHYs(string(secs.get("phy"))) {
+		p := Port{Name: ph.name, Label: ph.label, MAC: s.MAC, Up: ph.up, Speed: ph.speed, FullDuplex: ph.full}
 		if p.Up && first {
 			first = false
 			c := bytesOf[short("bcmeth0")]
@@ -231,6 +228,7 @@ func ParseAirPort(out []byte, now time.Time) (*Snapshot, error) {
 		}
 		s.Ports = append(s.Ports, p)
 	}
+	s.PortsOrdered = true
 
 	var radios []Radio
 	idx := map[string]int{}
@@ -293,6 +291,49 @@ func ParseAirPort(out []byte, now time.Time) (*Snapshot, error) {
 	sort.SliceStable(radios, func(i, j int) bool { return radios[i].Band > radios[j].Band }) // ng before na
 	s.Radios = radios
 	return s, nil
+}
+
+// apPHY is one switch PHY of `acp rpc acpd.system.show`.
+type apPHY struct {
+	name, label string
+	up, full    bool
+	speed       int
+}
+
+// parseAirPortPHYs reads the PHY blocks of `acp rpc acpd.system.show`:
+//
+//	PHY (0x20A480E0) index 0
+//	    Link State - Current  (link state is Down)
+//	PHY (0x20A48110) index 1
+//	    Link State - Current  (link state 1000Mbps Full Duplex)
+//
+// Every PHY is a port, in the listing's order; one with no "Current" line, or a
+// current state that is not a speed, is a port without link. Index 0 is the WAN
+// jack (airport-express-tools' notes; not confirmed on the A1470 by a cable),
+// the others are called lanN after their PHY index.
+func parseAirPortPHYs(text string) []apPHY {
+	hdr := apPhyHdr.FindAllStringSubmatchIndex(text, -1)
+	var out []apPHY
+	for i, h := range hdr {
+		end := len(text)
+		if i+1 < len(hdr) {
+			end = hdr[i+1][0]
+		}
+		block := text[h[1]:end]
+		ph := apPHY{}
+		if idx := text[h[2]:h[3]]; atoi(idx) == 0 {
+			ph.name, ph.label = "wan", "WAN"
+		} else {
+			ph.name, ph.label = "lan"+idx, "LAN "+idx
+		}
+		if m := apPhyRE.FindStringSubmatch(block); m != nil {
+			if sp := apSpdRE.FindStringSubmatch(m[1]); sp != nil {
+				ph.up, ph.speed, ph.full = true, int(atoi(sp[1])), sp[2] == "Full"
+			}
+		}
+		out = append(out, ph)
+	}
+	return out
 }
 
 // airportIfRadio reads the ssid/channel line and txpower of an ifconfig text

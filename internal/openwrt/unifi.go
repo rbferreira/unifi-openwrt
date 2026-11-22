@@ -56,6 +56,12 @@ func (s *Snapshot) Fields(prev *Snapshot, info CfgInfo, caps map[string]RadioCap
 	// them). Only a platform that reads sensors fills them (AirPort: envstat).
 	if deg, ok := s.Thermal.Hottest(); ok {
 		m["has_temperature"], m["general_temperature"] = true, deg
+		// The console's device record kept has_temperature and showed no value
+		// for the scalar. This repository has no capture of what a real device
+		// sends, so the array form of the gateways' inform ({name, type, value}
+		// per sensor) goes along with the scalar; which one the console reads
+		// for an AP is to be confirmed against it.
+		m["temperatures"] = s.Thermal.tempRows()
 	}
 	if len(s.Thermal.Fans) > 0 {
 		m["has_fan"] = true
@@ -119,11 +125,18 @@ func (s *Snapshot) Fields(prev *Snapshot, info CfgInfo, caps map[string]RadioCap
 				}
 				name = fmt.Sprintf("Port %d", idx)
 			}
+			if p.Label != "" && !rear {
+				name = p.Label
+			}
 			speed := p.Speed
 			if !p.Up || speed < 0 {
 				speed = 0
 			}
 			uplink := i == 0 && p.Up
+			if s.PortsOrdered { // the WAN jack comes first whether or not it is the uplink
+				u := s.uplinkPort()
+				uplink = u != nil && p.Up && u.Name == p.Name
+			}
 			row := map[string]any{
 				"port_idx": idx, "name": name, "media": "GE", "ifname": p.Name,
 				"poe_caps": 0, "port_poe": false, "speed_caps": 1048623, // 10/100/1000, autoneg
@@ -434,6 +447,15 @@ func (s *Snapshot) portMACs(port int) []map[string]any {
 // physPorts: the physical Ethernet ports, the uplink port first. Virtual
 // devices (no MAC: teql0 and the like) are left out.
 func (s *Snapshot) physPorts() []Port {
+	if s.PortsOrdered {
+		var all []Port
+		for _, p := range s.Ports {
+			if p.MAC != "" {
+				all = append(all, p)
+			}
+		}
+		return all
+	}
 	up := s.uplinkPort()
 	var out []Port
 	if up != nil {

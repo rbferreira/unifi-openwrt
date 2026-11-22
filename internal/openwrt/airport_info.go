@@ -89,6 +89,17 @@ func parseEnvstat(text string) Thermal {
 	return t
 }
 
+// tempRows is the temperatures as the array form of an inform: one {name, type,
+// value} per sensor, value in degrees C with one decimal. Every board sensor is
+// typed "board"; envstat does not say which one is the CPU.
+func (t Thermal) tempRows() []map[string]any {
+	rows := []map[string]any{}
+	for _, s := range t.Temps {
+		rows = append(rows, map[string]any{"name": s.Name, "type": "board", "value": math.Round(s.Value*10) / 10})
+	}
+	return rows
+}
+
 var apCountryRE = regexp.MustCompile(`^([A-Z]{2})(?:\s|$)`)
 
 // parseCountry reads `wl country`: "BR (BR/0) Brazil", the upper-case code
@@ -144,4 +155,20 @@ func AirPortCountryNotes(w translate.Wanted, real string) []string {
 		now = real
 	}
 	return []string{fmt.Sprintf("country %s requested by the controller: not applied, this unit's regulatory domain is fixed and the radios keep using %s", strings.Join(asked, ", "), now)}
+}
+
+// AirPortSystemNotes says, once per apply, what the controller asked of the
+// system that the unit will not take: the time zone and the NTP servers. The
+// base station keeps its own (sntpd and a zone set over ACP), which the daemon
+// does not change. The time zone is still used by the daemon itself, for WLAN
+// schedules (AirPortSchedule).
+func AirPortSystemNotes(cfg translate.Cfg) []string {
+	var notes []string
+	if tz := translate.TimezoneOf(cfg); tz != "" {
+		notes = append(notes, fmt.Sprintf("time zone %q requested by the controller: not applied to the unit, which keeps its own; the daemon reads WLAN schedules in it", tz))
+	}
+	if s := translate.NTPServers(cfg); len(s) > 0 {
+		notes = append(notes, fmt.Sprintf("NTP server(s) %s requested by the controller: not applied, the unit's own sntpd keeps using the server it is set to", strings.Join(s, ", ")))
+	}
+	return notes
 }

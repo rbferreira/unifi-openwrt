@@ -269,6 +269,16 @@ func (sc *scanner) fields(f map[string]any, s *openwrt.Snapshot, info openwrt.Cf
 	}
 }
 
+// source is the neighbour scan of a band and when it was taken: the input of
+// the AirPort's automatic channel (openwrt.AutoChannels). The slice is never
+// changed after a scan stores it, so it is handed out as it is.
+func (sc *scanner) source(band string) ([]openwrt.BSS, time.Time) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	r := sc.results[band]
+	return r.BSS, r.Time
+}
+
 // rrmSoon asks for a neighbour-list sync on the next loop (after a wifi
 // reload hostapd has forgotten the list).
 func (sc *scanner) rrmSoon() {
