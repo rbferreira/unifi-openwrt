@@ -812,7 +812,14 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 	// An empty or cut-short file is not "no WLANs": applying it would take
 	// every WLAN off the air (it happened, with a config truncated by a full
 	// disk). The controller's config always has its radio sections.
-	if parsed["radio.1.phyname"] == "" {
+	hasRadio := false
+	for k := range parsed {
+		if strings.HasPrefix(k, "radio.") && strings.HasSuffix(k, ".phyname") {
+			hasRadio = true
+			break
+		}
+	}
+	if !hasRadio {
 		log.Printf("plan: %s has no radio section (empty or truncated?): nothing applied", cfgPath)
 		return
 	}
