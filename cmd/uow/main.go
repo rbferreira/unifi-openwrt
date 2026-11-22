@@ -934,6 +934,7 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 	for _, n := range isoNotes {
 		log.Printf("  note: %s", n)
 	}
+	syncAirPortUplink(ap, parsed, apply)
 	if !apply {
 		if len(limits) > 0 {
 			log.Printf("LIMITS (log-only): %+v", limits)
@@ -974,6 +975,35 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 	}
 	syncAirPortACL(ap, true) // new VAPs have an empty driver ACL
 	syncAirPortPF(ap, true)
+}
+
+// syncAirPortUplink keeps the unit's wpa.conf (the mesh uplink's key, read by its
+// boot script at the next join) in step with the controller's mesh settings.
+// Log-only it says what it would do; neither the passphrase nor the key is ever
+// logged.
+func syncAirPortUplink(ap *openwrt.Client, cfg translate.Cfg, apply bool) {
+	if !apply {
+		text, note, err := openwrt.AirPortUplinkConf(cfg)
+		switch {
+		case err != nil:
+			log.Printf("UPLINK (log-only): credentials refused: %v", err)
+		case text == "":
+			log.Printf("  note: %s", note)
+		default:
+			log.Printf("UPLINK (log-only): would keep the mesh uplink credentials of %q in wpa.conf", cfg["mesh.essid"])
+		}
+		return
+	}
+	lines, note, err := ap.SyncAirPortUplink(cfg)
+	if note != "" {
+		log.Printf("  note: %s", note)
+	}
+	for _, l := range lines {
+		log.Printf("  airport: %s", l)
+	}
+	if err != nil {
+		log.Printf("UPLINK FAILED: %v", err)
+	}
 }
 
 func plan(ap *openwrt.Client, cfgPath string) (translate.Result, error) {

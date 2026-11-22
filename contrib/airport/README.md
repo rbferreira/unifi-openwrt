@@ -144,9 +144,14 @@ mkdir -p /mnt/Flash/mesh          # on the base station
 | `build/out/uow.blob`, `uow.meta.new`, `flash-uow.sh` | `/mnt/Memory/` | then `sh /mnt/Memory/flash-uow.sh` |
 
 The backhaul SSID and key are what the console hands a UniFi mesh child; an OpenWrt AP
-already meshing through this project has them in `/etc/unifi-openwrt/mesh.conf`. The uplink
-is configured by this file and by `up.sh`: the daemon does not take mesh credentials from
-the console.
+already meshing through this project has them in `/etc/unifi-openwrt/mesh.conf`. The first
+wireless join needs this file written by hand (unless the unit is adopted over a cable first:
+the daemon then writes it itself). Once the unit is adopted, the daemon keeps `wpa.conf` in
+step with the console's mesh settings: it derives the PMK from `mesh.essid` and `mesh.psk` and,
+only when the file would change, keeps the old one as `wpa.conf.prev` and writes the new one.
+The running association keeps its key; the file is read at the next join. If a join with the
+new file does not associate, `up.sh` tries `wpa.conf.prev` next and alternates, so a wrong key
+pushed by the console cannot strand the unit while the old one still works.
 
 `rc.local` is **sourced** by the boot script: it must never `exit` or block. Everything in
 it runs in a background subshell.
@@ -310,7 +315,8 @@ configuration file. Four states, and the third column says what was and was not 
 | 802.11k neighbour reports | not done | The radio firmware has them (`wl rrm` lists Neighbor_Report, `rrm_nbr_list` reads) and the daemon does not use them |
 | Device logins, SSH keys | not done | The login is root with the ACP admin password; changing it from the console could lock the unit out |
 | SNMP | not done | There is no `snmpd` on the unit and the daemon's SNMP step is OpenWrt's only |
-| Mesh credentials from the console, mesh children | not done | The uplink is `up.sh` and `wpa.conf` |
+| Mesh uplink credentials | built | The daemon derives the PMK from the console's `mesh.essid` and `mesh.psk` and keeps `/mnt/Flash/mesh/wpa.conf` in step (the old file stays as `wpa.conf.prev`, written only on a real change); `up.sh` falls back to the previous file when a join does not associate. Not yet exercised on the unit. The running uplink is never touched: the new key is used at the next join |
+| Mesh children | not done | The unit does not serve a mesh to other APs |
 | `uow -dump`, `owctl`, `owplan`, `owprobe` | built | Take `-ap-platform airport`; not yet run against the unit. `owctl` does kick and LED there, and refuses block (the driver ACLs belong to the daemon). No beep: no sound hardware |
 
 ## How the applier works
@@ -475,8 +481,8 @@ channel; an open WLAN and a hidden one through the console; any other AirPort mo
 parent that is not a UniFi AP.
 
 Not done, as the table says: a per-client download limit (not possible with `pf`) and an upload
-limit; WLANs on a VLAN and guest networks with a wired uplink; a captive portal; mesh
-credentials kept in sync from the console, and serving mesh children; device logins; SNMP; NTP
+limit; WLANs on a VLAN and guest networks with a wired uplink; a captive portal; serving
+mesh children; device logins; SNMP; NTP
 and the time zone; 802.11k neighbour lists.
 
 ## Undo

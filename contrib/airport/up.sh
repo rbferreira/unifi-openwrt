@@ -105,7 +105,35 @@ leave() {
 	ifconfig $IF down 2>/dev/null
 	say "$1: wireless uplink removed"
 }
+# Which wpa config a join uses. The daemon keeps wpa.conf in step with the controller and
+# leaves the file it replaced as wpa.conf.prev. A join that does not associate makes the next one
+# use the other file, and so on, so a wrong key pushed by the controller cannot strand the unit
+# while the old one still works. Nothing is deleted. Without a previous file there is only
+# wpa.conf. After WN failed joins in a row with wpa.conf, while wpa.conf.prev did associate, the
+# joins start with the file that last worked. Memory of the script's life only: wl = the file
+# that last associated, wfail = joins in a row that wpa.conf failed, wnext = the file to try
+# after a failure, wsig = what wpa.conf said at the last join (a new text starts over).
+WC=wpa.conf; WP=wpa.conf.prev; WN=3; wl=; wfail=0; wnext=; wsig=; wf=$WC; wquick=
+wpick() {
+	cur=$(cat $D/$WC 2>/dev/null)
+	[ "$cur" = "$wsig" ] || { [ -n "$wsig" ] && say "uplink: $WC changed"; wsig=$cur; wl=; wfail=0; wnext=; }
+	wf=$WC
+	[ "$wl" = $WP ] && [ $wfail -ge $WN ] && wf=$WP
+	[ -n "$wnext" ] && wf=$wnext
+	if [ ! -f $D/$wf ]; then
+		[ $wf = $WC ] && o=$WP || o=$WC
+		[ -f $D/$o ] && wf=$o
+	fi
+}
+# the join failed with $wf: the other file, if there is one, is next
+wfailed() {
+	[ $wf = $WC ] && { wfail=$((wfail + 1)); o=$WP; } || o=$WC
+	wnext=
+	[ -f $D/$o ] && { wnext=$o; wquick=1; }
+}
 join() {
+	wpick
+	say "uplink: joining with $wf"
 	vaps5_stop
 	vlans_stop
 	A=$(cat /var/run/ACPd.pid)
@@ -115,19 +143,21 @@ join() {
 	ifconfig $IF media autoselect
 	ifconfig $IF dwds
 	ifconfig $IF up; ifconfig $IF down
-	$M/wpa_supplicant -t -D bsd -i $IF -c $D/wpa.conf > $M/wpa.log 2>&1 &
+	$M/wpa_supplicant -t -D bsd -i $IF -c $D/$wf > $M/wpa.log 2>&1 &
 	echo $! > $M/wpa.pid
 	sleep 3
 	kill -CONT $A
 	n=0
 	until assoc; do n=$((n + 1)); [ $n -gt 45 ] && break; sleep 2; done
+	assoc && sleep 3   # the WPA handshake ends after "associated"; a wrong key is dropped in it
 	if assoc; then
-		sleep 3   # the WPA handshake ends after "associated"
+		wl=$wf; wnext=; [ $wf = $WC ] && wfail=0
 		brconfig $BR add $IF up && say "uplink associated and in $BR" || say "brconfig failed"
 		led 2
 		upc=$(upch)
 	else
-		say "uplink did not associate in 90 s"; led 1
+		say "uplink did not associate in 90 s with $wf"; led 1
+		wfailed
 	fi
 }
 
@@ -145,7 +175,7 @@ while :; do
 		[ $meshing = 1 ] && { leave "cable on the WAN port"; meshing=0; led 2; }
 	else
 		lost=$((lost + 5))
-		if [ $meshing = 0 ] && [ $lost -ge 20 ]; then join; meshing=1; bad=0; fi
+		if [ $meshing = 0 ] && [ $lost -ge 20 ]; then wquick=; join; meshing=1; bad=0; [ -n "$wquick" ] && bad=60; fi
 		if [ $meshing = 1 ]; then
 			if alive && assoc; then
 				bad=0
