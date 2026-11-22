@@ -47,6 +47,9 @@ func beepWAV() []byte {
 // Beep plays the locate sound on the AP's speaker, if it has a sound card
 // and aplay. It returns false (no error) when the AP cannot beep.
 func (cl *Client) Beep() (bool, error) {
+	if cl.IsAirPort() {
+		return false, nil // no sound hardware, and nothing to run: not an error
+	}
 	out, err := cl.RunStdin(`command -v aplay >/dev/null && grep -q . /proc/asound/cards 2>/dev/null || { echo nobeep; exit 0; }
 cat > /tmp/unifi-locate.wav && (aplay -q /tmp/unifi-locate.wav >/dev/null 2>&1 &) ; echo beep`, beepWAV())
 	if err != nil {

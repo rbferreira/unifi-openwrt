@@ -21,6 +21,14 @@ rm -f $M/uow.blob     # the RAM disk cannot hold the blob and two copies of the 
 got=$(dd if=/dev/rflash1c bs=65536 skip=$SKIP count=$COUNT 2>/dev/null | $D/unxz | openssl md5 2>/dev/null | sed "s/.*= //")
 [ "$got" = "$MD5" ] || { echo "checksum mismatch: $got, want $MD5 (the old binary keeps running from RAM)"; exit 1; }
 cp $M/uow.meta.new $D/uow.meta && rm -f $M/uow.meta.new
-kill $(cat $M/uow.pid 2>/dev/null) 2>/dev/null; sleep 1; rm -f $M/uow
-dd if=/dev/rflash1c bs=65536 skip=$SKIP count=$COUNT 2>/dev/null | $D/unxz > $M/uow && chmod 755 $M/uow
+# The RAM disk holds one copy of the binary, not two: the old daemon must be gone, and its
+# file with it, before the new one is unpacked. Unpacked under another name, so the watcher
+# cannot start a half-written binary (both happened: the disk filled, the copy came out short
+# and the space only came back with a reboot).
+p=$(cat $M/uow.pid 2>/dev/null); rm -f $M/uow
+if [ -n "$p" ]; then kill $p 2>/dev/null; n=0; while kill -0 $p 2>/dev/null && [ $n -lt 15 ]; do sleep 1; n=$((n + 1)); done; fi
+dd if=/dev/rflash1c bs=65536 skip=$SKIP count=$COUNT 2>/dev/null | $D/unxz > $M/uow.new
+set -- $(ls -l $M/uow.new)
+if [ "$5" != "$SIZE" ]; then rm -f $M/uow.new; echo "unpacked $5 bytes, expected $SIZE: RAM disk full? The image on flash is good: reboot the base station"; exit 1; fi
+chmod 755 $M/uow.new && mv $M/uow.new $M/uow
 echo "installed; up.sh restarts the daemon within 5 s"

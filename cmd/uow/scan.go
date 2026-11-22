@@ -24,7 +24,8 @@ type scanner struct {
 	spectrum bool // an RF scan (spectrum-scan) is running
 	results  map[string]openwrt.ScanResult
 	lastBG   time.Time
-	snap     *openwrt.Snapshot // last AP reading (from the inform)
+	apScan   map[string]time.Time // AirPort: when each radio was last really scanned
+	snap     *openwrt.Snapshot    // last AP reading (from the inform)
 	lastRRM  time.Time
 	rrmErr   string
 }
@@ -34,9 +35,6 @@ var scans = &scanner{results: map[string]openwrt.ScanResult{}}
 // start scans in the background; force = asked for by the controller (all
 // radios, clients or not).
 func (sc *scanner) start(ap *openwrt.Client, force, spectrum bool) {
-	if ap.IsAirPort() {
-		return // read-only platform: no scans
-	}
 	sc.mu.Lock()
 	if sc.running {
 		sc.spectrum = sc.spectrum || spectrum
@@ -53,6 +51,10 @@ func (sc *scanner) start(ap *openwrt.Client, force, spectrum bool) {
 			sc.mu.Unlock()
 			sc.syncRRM(ap)
 		}()
+		if ap.IsAirPort() {
+			sc.scanAirPort(ap, force)
+			return
+		}
 		// a spare radio scans without touching the client radios
 		if ap.EnsureScanIface() {
 			t0 := time.Now()
@@ -115,11 +117,68 @@ func (sc *scanner) start(ap *openwrt.Client, force, spectrum bool) {
 	}()
 }
 
+// apScanGap is the least time between two real scans of one AirPort radio,
+// whoever asks (the controller's command included): a scan on the unit takes
+// its radio off the channel for several seconds.
+const apScanGap = 30 * time.Second
+
+// scanAirPort scans the AirPort's radios by `wl scan` / `wl scanresults` (see
+// openwrt.AirPortScanMode for what each radio may do: 2.4 GHz is scanned, the
+// 5 GHz radio only when no mesh uplink sits on it and, in the background, no
+// client; with the uplink only the driver's cached results are read). There is
+// no channel survey on this unit, so no spectrum_table.
+func (sc *scanner) scanAirPort(ap *openwrt.Client, force bool) {
+	s, err := ap.Collect()
+	if err != nil {
+		log.Printf("scan: reading the AP: %v", err)
+		return
+	}
+	uplink5 := s.UplinkChannel("na")
+	for _, r := range s.Radios {
+		uplink, clients := false, false
+		for _, v := range r.VAPs {
+			if v.Mode == "Client" {
+				uplink = true
+			} else if len(v.Stations) > 0 {
+				clients = true
+			}
+		}
+		mode := openwrt.AirPortScanMode(r.Phy, uplink, clients, force)
+		sc.mu.Lock()
+		if mode == openwrt.ScanActive && time.Since(sc.apScan[r.Phy]) < apScanGap {
+			mode = openwrt.ScanCached
+		}
+		sc.mu.Unlock()
+		if mode == openwrt.ScanSkip {
+			continue
+		}
+		t0 := time.Now()
+		bss, err := ap.ScanAirPort(r.Phy, mode == openwrt.ScanActive, uplink5)
+		if err != nil {
+			log.Printf("scan %s: %v", r.Band, err)
+			continue
+		}
+		sc.mu.Lock()
+		if sc.apScan == nil {
+			sc.apScan = map[string]time.Time{}
+		}
+		if mode == openwrt.ScanActive {
+			sc.apScan[r.Phy] = time.Now()
+		}
+		// a cached read that finds nothing does not wipe the last good result
+		if _, have := sc.results[r.Band]; !have || mode == openwrt.ScanActive || len(bss) > 0 {
+			sc.results[r.Band] = openwrt.ScanResult{Band: r.Band, Time: time.Now(), BSS: bss}
+		}
+		sc.mu.Unlock()
+		log.Printf("scan %s (%s, %s): %d networks in %s", r.Band, r.Phy, map[bool]string{true: "scanned", false: "cached results"}[mode == openwrt.ScanActive], len(bss), time.Since(t0).Round(100*time.Millisecond))
+	}
+}
+
 // background: called each loop; starts a gentle scan when due.
 func (sc *scanner) background(ap *openwrt.Client) {
 	sc.mu.Lock()
 	due := !sc.running && time.Since(sc.lastBG) >= bgScanEvery
-	rrmDue := !sc.running && time.Since(sc.lastRRM) >= 5*time.Minute
+	rrmDue := !sc.running && time.Since(sc.lastRRM) >= 5*time.Minute && !ap.IsAirPort()
 	sc.mu.Unlock()
 	if due {
 		sc.start(ap, false, false)

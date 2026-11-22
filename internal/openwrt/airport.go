@@ -32,7 +32,9 @@ echo "=== sys"
 echo "release=$(uname -r)"; echo "hostname=$(hostname)"; echo "now=$(date +%s)"
 echo "boottime=$(sysctl -n kern.boottime)"; echo "physmem=$(sysctl -n hw.physmem)"
 echo "loadavg=$(sysctl -n vm.loadavg)"; echo "cp_time=$(sysctl -n kern.cp_time)"
-echo "model=$(/usr/bin/acp syAM 2>/dev/null)"
+echo "model=$(/usr/bin/acp syAM 2>/dev/null)"; echo "firmware=$(/usr/bin/acp syVs 2>/dev/null)"
+echo "=== env"; envstat 2>/dev/null
+echo "=== country"; wl -i bwl1 country 2>/dev/null
 echo "=== vmstat"; vmstat -s
 echo "=== lan"; ifconfig bridge0
 echo "=== route"; netstat -rn -f inet
@@ -89,6 +91,9 @@ func ParseAirPort(out []byte, now time.Time) (*Snapshot, error) {
 	if m := strings.TrimSpace(sys["model"]); m != "" {
 		s.Model = "Apple " + strings.TrimPrefix(strings.TrimPrefix(m, "syAM="), "syAM = ")
 	}
+	s.Firmware = parseFirmware(sys["firmware"])
+	s.Country = parseCountry(string(secs.get("country")))
+	s.Thermal = parseEnvstat(string(secs.get("env")))
 	if b, n := atoi(sys["boottime"]), atoi(sys["now"]); b > 0 && n >= b {
 		s.Uptime = n - b
 	}
@@ -442,15 +447,3 @@ func normMAC(m string) string {
 
 // IsAirPort reports whether the AP is an AirPort base station.
 func (cl *Client) IsAirPort() bool { return cl.t.Platform == PlatformAirPort }
-
-// airportLED maps a UniFi LED state onto the base station's one status LED
-// (ACP property LEDc: 1 = amber, 2 = green; it has no blue and no off):
-// steady blue (adopted and connected) is green, everything else amber.
-func (cl *Client) airportLED(s LEDState) error {
-	v := 1
-	if s == LEDBlue {
-		v = 2
-	}
-	_, err := cl.run("/usr/bin/acp -q LEDc=" + strconv.Itoa(v))
-	return err
-}

@@ -51,6 +51,24 @@ func (s *Snapshot) Fields(prev *Snapshot, info CfgInfo, caps map[string]RadioCap
 	if s.Gateway != "" {
 		m["gateway_ip"] = s.Gateway
 	}
+	// Board temperature and fan, the names a UniFi switch uses for them (an AP
+	// has none of its own; a controller that does not read them for an AP drops
+	// them). Only a platform that reads sensors fills them (AirPort: envstat).
+	if deg, ok := s.Thermal.Hottest(); ok {
+		m["has_temperature"], m["general_temperature"] = true, deg
+	}
+	if len(s.Thermal.Fans) > 0 {
+		m["has_fan"] = true
+		if s.Thermal.HasDuty {
+			m["fan_level"] = s.Thermal.Duty
+		}
+	}
+	if s.Firmware != "" {
+		// the unit's real firmware, in a key the controller has no use for: the
+		// "version" field stays the model's, because the controller decides
+		// upgrades from it
+		m["airport_firmware"] = s.Firmware
+	}
 	// system-stats: what the controller graphs as CPU / Memory (strings, like a UAP)
 	cpu := 0.0
 	if prev != nil && s.CPUTotal > prev.CPUTotal {

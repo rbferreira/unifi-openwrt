@@ -153,6 +153,9 @@ func main() {
 			log.Fatalf("refusing: -mac %s is not the AP's MAC (%s, %q)", mac, snap.MAC, snap.Model)
 		}
 		log.Printf("AP: %q %s, %s, ip %s, %d radios", snap.Model, snap.Release, snap.MAC, snap.IP, len(snap.Radios))
+		if snap.Firmware != "" || snap.Country != "" {
+			log.Printf("AirPort firmware %q, radio country %q (fixed in this unit)", snap.Firmware, snap.Country)
+		}
 		for _, r := range snap.OffRadios {
 			log.Printf("radio %s is switched off in OpenWrt: left alone and not shown in the UniFi (to hand it over: uci set wireless.%s.disabled=0; uci commit wireless; wifi; then restart unifi-openwrt)", r, r)
 		}
@@ -229,6 +232,13 @@ func main() {
 			radioCaps[b] = openwrt.RadioCaps{IEEEModes: r.IEEEModes, RadioCaps: r.RadioCaps, RadioCaps2: r.RadioCaps2, HasDFS: r.HasDFS, HasFCCDFS: r.HasFCCDFS}
 		}
 		log.Printf("profile caps: %s wifi_caps=%d wifi_caps2=%d fw_caps=%d fw2_caps=%d", p.Model, p.WifiCaps, p.WifiCaps2, p.FWCaps, p.FW2Caps)
+	}
+	if ap != nil && ap.IsAirPort() {
+		// claim nothing this hardware is proven unable to do (WPA3)
+		if c := openwrt.AirPortWifiCaps(x.WifiCaps); c != x.WifiCaps {
+			log.Printf("AirPort: wifi_caps %d -> %d (WPA3 bit cleared: the radio driver cannot do it)", x.WifiCaps, c)
+			x.WifiCaps = c
+		}
 	}
 	if ap != nil {
 		prev := snap
@@ -801,6 +811,7 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 	w := translate.Wifi(translate.ParseCfg(string(cfg)), snap.RadioNames())
 	uplink5 := snap.UplinkChannel("na")
 	vaps, notes := openwrt.AirPortVAPs(w, uplink5)
+	notes = append(notes, openwrt.AirPortCountryNotes(w, snap.Country)...)
 	mode := "log-only, not applied"
 	if apply {
 		mode = "applying"

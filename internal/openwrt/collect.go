@@ -47,6 +47,12 @@ type Client struct {
 	t  Target
 	mu sync.Mutex
 	c  *ssh.Client
+
+	// AirPort LED (airport_led.go): the running Locate blink, and the one-time
+	// note that the LED cannot be turned off.
+	ledMu  sync.Mutex
+	blink  *apBlink
+	ledOff sync.Once
 }
 
 func NewClient(t Target) *Client { return &Client{t: t} }
@@ -209,6 +215,11 @@ type Snapshot struct {
 	// RearUplink: the port number the model gives its rear uplink jack
 	// (models.Model.RearUplinkPort); 0 = the uplink is port 1.
 	RearUplink int
+	// Firmware and Country: the AirPort's own firmware version (acp syVs) and the
+	// country its radio really uses (wl country); empty when not read.
+	Firmware, Country string
+	// Thermal: board temperatures and the fan (AirPort: envstat).
+	Thermal Thermal
 }
 
 // FDBEntry is one row of the br-lan forwarding database
