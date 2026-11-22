@@ -402,3 +402,31 @@ aaa.1.ssid=FromAAA
 		t.Errorf("%+v", l)
 	}
 }
+
+func TestWifiDTIMAndMaxClients(t *testing.T) {
+	cfg := wantedRadios + `wireless.1.ssid=Casa
+wireless.1.parent=wifi0
+wireless.1.dtim_period=5
+wireless.2.ssid=Casa
+wireless.2.parent=wifi1
+wireless.2.dtim_period=300
+wireless.3.ssid=Other
+wireless.3.parent=wifi0
+stamgr.1.radio=ng
+stamgr.1.loadbalance.status=true
+stamgr.1.loadbalance.maxsta=30
+stamgr.2.radio=na
+stamgr.2.loadbalance.status=false
+stamgr.2.loadbalance.maxsta=10
+`
+	w := Wifi(ParseCfg(cfg), nil)
+	for _, tc := range []struct {
+		n         string
+		dtim, max int
+	}{{"1", 5, 30}, {"2", 0, 0}, {"3", 0, 30}} {
+		l := wlanBy(t, w, tc.n)
+		if l.DTIM != tc.dtim || l.MaxClients != tc.max {
+			t.Errorf("wireless.%s: DTIM %d, MaxClients %d, want %d and %d", tc.n, l.DTIM, l.MaxClients, tc.dtim, tc.max)
+		}
+	}
+}

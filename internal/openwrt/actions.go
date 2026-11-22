@@ -70,6 +70,9 @@ var macOK = regexp.MustCompile(`^[0-9a-f]{2}(:[0-9a-f]{2}){5}$`)
 // Kick disconnects a client from every BSS (UniFi "Reconnect"); it may come
 // straight back.
 func (cl *Client) Kick(mac string) error {
+	if cl.IsAirPort() {
+		return cl.kickAirPort(mac)
+	}
 	s, err := hostapdLoop([]string{mac}, `ubus call $o del_client "{\"addr\":\"$m\",\"reason\":5,\"deauth\":true,\"ban_time\":0}" >/dev/null 2>&1`)
 	if err != nil {
 		return err

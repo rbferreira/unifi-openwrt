@@ -49,6 +49,12 @@ type WantedWLAN struct {
 	MACPolicy string // "disable", "allow" or "deny"
 	MACs      []string
 	VLAN      int // 0 = untagged
+
+	DTIM int // wireless.N.dtim_period; 0 = not given
+	// MaxClients is the station limit of the WLAN's radio (stamgr loadbalance
+	// maxsta): the controller has no per-WLAN limit, and on OpenWrt the radio's
+	// value goes on every interface of that radio. 0 = no limit asked.
+	MaxClients int
 }
 
 // Wifi reads the controller's Wi-Fi settings out of cfg.
@@ -114,6 +120,12 @@ func Wifi(cfg Cfg, phys map[string]string) Wanted {
 		w.Radios = append(w.Radios, r)
 	}
 
+	bandOf := map[string]string{} // radio name -> band
+	for _, r := range w.Radios {
+		bandOf[r.Name] = r.Band
+	}
+	maxSta := maxStations(cfg)
+
 	for _, n := range indices(cfg, "wireless") {
 		wp, a := "wireless."+n+".", "aaa."+n+"."
 		if cfg[wp+"usage"] == "uplink" || cfg[wp+"vwire"] == "enabled" || cfg[wp+"vport"] == "enabled" {
@@ -160,6 +172,10 @@ func Wifi(cfg Cfg, phys map[string]string) Wanted {
 			VLAN:      vlanID(cfg, cfg[wp+"devname"]),
 			MACPolicy: "disable",
 		}
+		if d, err := strconv.Atoi(cfg[wp+"dtim_period"]); err == nil && d >= 1 && d <= 255 {
+			l.DTIM = d
+		}
+		l.MaxClients = maxSta[bandOf[parent]]
 		if enc != "none" {
 			l.Passphrase = cfg[a+"wpa.psk"]
 			if l.Passphrase == "" {
@@ -178,6 +194,25 @@ func Wifi(cfg Cfg, phys map[string]string) Wanted {
 		w.WLANs = append(w.WLANs, l)
 	}
 	return w
+}
+
+// maxStations is the station limit per band ("2g", "5g", "6g") from the
+// stamgr sections (planStamgr reads the same keys): load balancing on with a
+// maximum. A band with no such section has no entry.
+func maxStations(cfg Cfg) map[string]int {
+	bands := map[string]string{"ng": "2g", "na": "5g", "6e": "6g"}
+	out := map[string]int{}
+	for i := 1; i <= 8; i++ {
+		p := fmt.Sprintf("stamgr.%d.", i)
+		b := bands[cfg[p+"radio"]]
+		if b == "" || cfg[p+"loadbalance.status"] != "true" {
+			continue
+		}
+		if v, err := strconv.Atoi(cfg[p+"loadbalance.maxsta"]); err == nil && v > 0 {
+			out[b] = v
+		}
+	}
+	return out
 }
 
 // modeWidth is the channel width in MHz named by an ieee_mode (11nght20,

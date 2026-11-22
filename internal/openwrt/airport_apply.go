@@ -22,6 +22,8 @@ const (
 	apRunDir   = "/mnt/Memory/uowap"
 	apSeedFile = "/mnt/Flash/mesh/hostap.seed" // sku= and region= of this unit, saved at install time
 	apMaxVAPs  = 8                             // per radio: wlan10..17 and wlan20..27
+	apMaxSta   = 64                            // the driver's bss_maxassoc: hostapd's max_clients above it means nothing
+	apDTIM     = 3                             // the firmware's own dtim
 )
 
 // apVAPName is what the applier may create, stop and destroy: nothing else.
@@ -53,6 +55,18 @@ type AirPortVAP struct {
 	// The unit's own sku= and region= lines go between them, and only the
 	// device knows them (apSeedFile).
 	Head, Tail string
+
+	// What is not in the hostapd config, so changing it never restarts a radio:
+	// the driver ACL (airport_ctl.go: MACPolicy "disable", "allow" or "deny" with
+	// MACs, lower case and sorted), client isolation (the driver's apbridge flag)
+	// and the radio's transmit power (set on the radio's first VAP).
+	MACPolicy string
+	MACs      []string
+	Isolate   bool
+	// TxPower in dBm: 0 = the radio's own power. On both radios, the 5 GHz one
+	// with the mesh uplink too (measured: it lowers the uplink's power with it
+	// and the uplink stays associated).
+	TxPower int
 }
 
 // Config is the whole hostapd config, with the unit's regulatory ids.
@@ -87,7 +101,7 @@ func AirPortVAPs(w translate.Wanted, uplink5 int) ([]AirPortVAP, []string) {
 	first := map[string]string{} // parent -> its first VAP
 	hasVAP := map[string]bool{}
 	var vaps []AirPortVAP
-	isolate, macs, pmf := 0, 0, 0
+	pmf, badMACs, bigLimit := 0, 0, 0
 
 	for _, l := range w.WLANs {
 		skip := func(why string) {
@@ -137,20 +151,23 @@ func AirPortVAPs(w translate.Wanted, uplink5 int) ([]AirPortVAP, []string) {
 			}
 			slots[parent]++
 			hasVAP[r.Name] = true
+			var bad int
+			v.MACPolicy, v.MACs, bad = aclPolicy(l.MACPolicy, l.MACs)
+			badMACs += bad
+			if v.MACPolicy == "allow" && len(v.MACs) == 0 {
+				notes = append(notes, fmt.Sprintf("wireless.%s (%q on %s): MAC filter allows nobody (empty allow list)", l.N, l.SSID, l.Radio))
+			}
+			if l.MaxClients > apMaxSta {
+				bigLimit++
+			}
 			vaps = append(vaps, v)
-			if l.Isolate {
-				isolate++
-			}
-			if l.MACPolicy != "" && l.MACPolicy != "disable" {
-				macs++
-			}
 			if l.PMF == 2 {
 				pmf++
 			}
 		}
 	}
 
-	var width, power []string
+	var width []string
 	for _, r := range w.Radios {
 		if !hasVAP[r.Name] {
 			continue
@@ -162,9 +179,6 @@ func AirPortVAPs(w translate.Wanted, uplink5 int) ([]AirPortVAP, []string) {
 		if r.Width != 0 && !(r.Band == "2g" && r.Width == 20) && !(tuned && r.Width <= 80) {
 			width = append(width, fmt.Sprintf("%s %d MHz", r.Name, r.Width))
 		}
-		if r.TxPower > 0 {
-			power = append(power, fmt.Sprintf("%s %d dBm", r.Name, r.TxPower))
-		}
 		if r.Band == "5g" && uplink5 > 0 && r.Channel > 0 && r.Channel != uplink5 {
 			notes = append(notes, fmt.Sprintf("radio %s: channel %d requested, but the 5 GHz radio follows the mesh uplink on channel %d", r.Name, r.Channel, uplink5))
 		}
@@ -172,14 +186,11 @@ func AirPortVAPs(w translate.Wanted, uplink5 int) ([]AirPortVAP, []string) {
 	if len(width) > 0 {
 		notes = append(notes, fmt.Sprintf("channel width not applied (%s): 2.4 GHz stays at 20 MHz, 5 GHz does up to 80 MHz and takes the mesh uplink's width while there is one or the channel is automatic", strings.Join(width, ", ")))
 	}
-	if len(power) > 0 {
-		notes = append(notes, fmt.Sprintf("transmit power not applied (%s): hostapd's tx_power has no effect here", strings.Join(power, ", ")))
+	if badMACs > 0 {
+		notes = append(notes, fmt.Sprintf("MAC filter: %d entr(ies) that are not a MAC address were left out", badMACs))
 	}
-	if isolate > 0 {
-		notes = append(notes, fmt.Sprintf("client isolation requested on %d WLAN(s): not supported on this platform", isolate))
-	}
-	if macs > 0 {
-		notes = append(notes, fmt.Sprintf("MAC filter requested on %d WLAN(s): not supported on this platform", macs))
+	if bigLimit > 0 {
+		notes = append(notes, fmt.Sprintf("client limit above %d on %d WLAN(s): the driver's limit per WLAN is %d", apMaxSta, bigLimit, apMaxSta))
 	}
 	if pmf > 0 {
 		notes = append(notes, fmt.Sprintf("protected management frames required on %d WLAN(s): not supported on this platform", pmf))
@@ -225,6 +236,18 @@ func airPortVAP(suffix, parent string, r translate.WantedRadio, l translate.Want
 		}
 	}
 	name := "wlan" + suffix
+	dtim := apDTIM
+	if l.DTIM >= 1 && l.DTIM <= 255 {
+		dtim = l.DTIM
+	}
+	maxSta := apMaxSta
+	if l.MaxClients >= 1 && l.MaxClients < apMaxSta {
+		maxSta = l.MaxClients
+	}
+	tx := r.TxPower
+	if tx < 0 {
+		tx = 0
+	}
 
 	var h strings.Builder
 	w := func(k, v string) { h.WriteString(k + "=" + v + "\n") }
@@ -250,7 +273,7 @@ func airPortVAP(suffix, parent string, r translate.WantedRadio, l translate.Want
 	w("hw_mode", pick("ng", "a"))
 	w("doth", "1")
 	w("dotd", "1")
-	w("dtim", "3")
+	w("dtim", fmt.Sprint(dtim))
 	w("mcast_rate", pick("2", "6"))
 	if l.Security == "psk2" {
 		w("wpa", "2")
@@ -278,11 +301,12 @@ func airPortVAP(suffix, parent string, r translate.WantedRadio, l translate.Want
 	}
 	w("userland_dfs", "0")
 	w("tx_power", "100")
-	w("max_clients", "64")
+	w("max_clients", fmt.Sprint(maxSta))
 	if ch > 0 {
 		w("channel", fmt.Sprint(ch))
 	}
-	return AirPortVAP{Name: name, Parent: parent, SSID: l.SSID, Security: l.Security, Channel: ch, ChannelOf: follow, Tune: tune, Spec: spec, Head: h.String(), Tail: t.String()}
+	return AirPortVAP{Name: name, Parent: parent, SSID: l.SSID, Security: l.Security, Channel: ch, ChannelOf: follow, Tune: tune, Spec: spec, Head: h.String(), Tail: t.String(),
+		Isolate: l.Isolate, TxPower: tx}
 }
 
 // UplinkChannel is the channel of the mesh uplink (the client VAP) on the radio
@@ -327,12 +351,7 @@ func (cl *Client) ApplyAirPort(vaps []AirPortVAP) ([]string, error) {
 	// The script is the stdin of a plain sh: the passphrases never reach a
 	// command line, where ps would show them.
 	out, err := cl.runStdin("sh", []byte(AirPortApplyScript(vaps)))
-	var lines []string
-	for _, l := range strings.Split(string(out), "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			lines = append(lines, l)
-		}
-	}
+	lines := reportLines(out)
 	if err != nil {
 		return lines, fmt.Errorf("airport apply: %w", err)
 	}
@@ -403,7 +422,7 @@ stop() {
 		while alive $1 && [ $n -lt 5 ]; do sleep 1; n=$((n + 1)); done
 		alive $1 && kill -9 $(cat $D/$1.pid) 2>/dev/null
 	fi
-	rm -f $D/$1.pid
+	rm -f $D/$1.pid $D/$1.acl # a VAP made again starts with an empty driver ACL
 	brconfig bridge0 delete $1 >/dev/null 2>&1
 	ifconfig $1 destroy >/dev/null 2>&1
 }
@@ -425,6 +444,7 @@ ok() {
 # (the config has the channel of the mesh uplink, which alone tunes the radio).
 start() {
 	v=$1
+	rm -f $D/$v.acl
 	ifconfig $v create wlandev $2 wlanmode hostap >/dev/null 2>&1 || { echo "$v failed: ifconfig create"; rm -f $D/$v.new; return; }
 	case $3 in auto|-) ;; *) ifconfig $v channel $3 >/dev/null 2>&1;; esac
 	mv $D/$v.new $D/$v.want
@@ -475,6 +495,41 @@ radio() {
 	echo "$ch" > $D/$r.chan
 	for v in "$@"; do start $v $r $ch $1; done
 }
+# iso VAP FLAG: client isolation is the driver's AP bridging: "-apbridge" keeps
+# the stations of the VAP apart, "apbridge" lets them talk (measured: wl
+# ap_isolate reads 1 and 0). Set every time, on every VAP: it costs one call.
+iso() {
+	ifconfig $1 $2 >/dev/null 2>&1
+}
+# txpow RADIO VAP N: the transmit power is the radio's, set through any of its
+# VAPs. N is dBm; "auto" puts back the power the radio had before the first
+# change (kept in RADIO.txpower0, read from ifconfig). A number above that
+# original is cut to it: the driver takes a higher target and does nothing
+# useful with it.
+# tenths N: dBm as an integer of tenths ("18.5" -> 185, "19" -> 190)
+tenths() {
+	echo "$1" | sed -e 's/^\([0-9]*\)\.\(.\).*/\1\2/;t' -e 's/$/0/'
+}
+txpow() {
+	r=$1; v=$2; n=$3
+	running $v || return
+	cur=$(ifconfig $v 2>/dev/null | sed -n 's/.*[[:space:]]txpower \([0-9][0-9.]*\).*/\1/p')
+	[ -n "$cur" ] || return
+	f=$D/$r.txpower0
+	if [ "$n" = auto ]; then
+		[ -f $f ] || return
+		n=$(cat $f)
+	else
+		[ -f $f ] || echo "$cur" > $f
+		[ $(tenths $n) -gt $(tenths $(cat $f)) ] && n=$(cat $f)
+	fi
+	[ "${cur%.0}" = "${n%.0}" ] && return
+	if ifconfig $v txpower $n >/dev/null 2>&1 || ifconfig $v txpower ${n%.*} >/dev/null 2>&1; then
+		echo "$r txpower $n dBm"
+	else
+		echo "$r txpower $n dBm: ifconfig refused it"
+	fi
+}
 `
 
 // AirPortApplyScript is the shell script ApplyAirPort runs. Each config goes in
@@ -509,6 +564,26 @@ func AirPortApplyScript(vaps []AirPortVAP) string {
 			names += " " + v.Name
 		}
 		fmt.Fprintf(&b, "radio %s '%s' %s%s\n", r.parent, r.pat, ch, names)
+	}
+	// after the radios are settled: what is not in a hostapd config
+	for _, v := range vaps {
+		flag := "apbridge"
+		if v.Isolate {
+			flag = "-apbridge"
+		}
+		fmt.Fprintf(&b, "iso %s %s\n", v.Name, flag)
+	}
+	done := map[string]bool{}
+	for _, v := range vaps {
+		if done[v.Parent] {
+			continue
+		}
+		done[v.Parent] = true
+		p := "auto"
+		if v.TxPower > 0 {
+			p = fmt.Sprint(v.TxPower)
+		}
+		fmt.Fprintf(&b, "txpow %s %s %s\n", v.Parent, v.Name, p)
 	}
 	b.WriteString("exit 0\n")
 	return b.String()

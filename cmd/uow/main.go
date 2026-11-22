@@ -254,7 +254,7 @@ func main() {
 				}
 			}
 			shapeReconcile(ap, s)
-			minRSSIKick(ap, s)
+			minRSSIKick(ap.Kick, s)
 			f := s.Fields(prev, info, radioCaps)
 			scans.fields(f, s, info)
 			prev = s
@@ -313,6 +313,7 @@ func main() {
 	ledCfgPath = filepath.Join(*stateDir, "system_cfg.txt")
 	if ap != nil {
 		ledUpdate(ap, x) // flashing white until the controller answers
+		airportBlocked = x.S.Blocked
 	}
 	if ap != nil {
 		if _, err := os.Stat(filepath.Join(*stateDir, "system_cfg.txt")); err == nil {
@@ -332,6 +333,7 @@ func main() {
 	for {
 		cfgBefore := x.S.CfgVersion
 		next, ok := informOnce(x, client, statePath)
+		airportBlocked = x.S.Blocked
 		if ok && !ledStarted {
 			ledStarted = true
 		}
@@ -352,7 +354,9 @@ func main() {
 			ledUpdate(ap, x)
 			scans.background(ap)
 		}
-		if ap != nil && len(x.S.Blocked) > 0 && time.Since(lastBan) >= openwrt.BanTime/3 {
+		if ap != nil && ap.IsAirPort() {
+			syncAirPortACL(ap, false) // the blocked list changed (or nothing to do)
+		} else if ap != nil && len(x.S.Blocked) > 0 && time.Since(lastBan) >= openwrt.BanTime/3 {
 			if err := ap.EnforceBlocked(x.S.Blocked); err != nil {
 				log.Printf("blocked clients: %v", err)
 			} else {
@@ -714,10 +718,38 @@ var (
 	airportCfgPath string
 	airportApply   bool
 	// what the last apply asked for, and when it was last looked at (airportKeep)
-	airportWanted  []string
+	airportVAPs    []openwrt.AirPortVAP // with their MAC filter, isolation and power
 	airportUplink5 int
 	airportChecked time.Time
+	// the controller's blocked clients (set on every pass of the main loop) and
+	// the list the driver ACLs were last synced with
+	airportBlocked []string
+	airportACLKey  string
+	airportACLDone bool
 )
+
+// syncAirPortACL brings the driver ACL of every VAP of the last apply to the
+// WLAN's MAC filter plus the blocked clients. Without force it does nothing
+// while the blocked list is the one last synced (the script itself is cheap
+// and idempotent, so airportKeep forces it once a minute). A failure is
+// logged and not retried until then.
+func syncAirPortACL(ap *openwrt.Client, force bool) {
+	if !airportApply || len(airportVAPs) == 0 {
+		return
+	}
+	key := strings.Join(airportBlocked, " ")
+	if !force && airportACLDone && key == airportACLKey {
+		return
+	}
+	airportACLKey, airportACLDone = key, true
+	lines, err := ap.SyncAirPortACL(airportVAPs, airportBlocked)
+	for _, l := range lines {
+		log.Printf("  airport: %s", l)
+	}
+	if err != nil {
+		log.Printf("ACL FAILED: %v", err)
+	}
+}
 
 // airportKeep applies again when the unit no longer runs what the last apply
 // asked for: its boot script takes the 5 GHz VAPs down around a change of the
@@ -736,13 +768,14 @@ func airportKeep(ap *openwrt.Client) {
 	if c := snap.UplinkChannel("na"); c != airportUplink5 {
 		why = fmt.Sprintf("the 5 GHz uplink went from channel %d to %d", airportUplink5, c)
 	}
-	for _, v := range airportWanted {
-		if snap.APVAP(v) == nil {
-			why = v + " is not running"
+	for _, v := range airportVAPs {
+		if snap.APVAP(v.Name) == nil {
+			why = v.Name + " is not running"
 			break
 		}
 	}
 	if why == "" {
+		syncAirPortACL(ap, true)
 		return
 	}
 	log.Printf("airport: %s: applying again", why)
@@ -782,10 +815,7 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 	if !apply {
 		return
 	}
-	airportWanted, airportUplink5, airportChecked = nil, uplink5, time.Now()
-	for _, v := range vaps {
-		airportWanted = append(airportWanted, v.Name)
-	}
+	airportVAPs, airportUplink5, airportChecked = vaps, uplink5, time.Now()
 	lines, err := ap.ApplyAirPort(vaps)
 	for _, l := range lines {
 		log.Printf("  airport: %s", l)
@@ -812,6 +842,7 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 	if len(down) > 0 {
 		log.Printf("  not running: %v", down)
 	}
+	syncAirPortACL(ap, true) // new VAPs have an empty driver ACL
 }
 
 func plan(ap *openwrt.Client, cfgPath string) (translate.Result, error) {
@@ -847,6 +878,10 @@ func runAction(ap *openwrt.Client, x *device.Session, a string) {
 	}
 	if mac, ok := strings.CutPrefix(a, "unblock:"); ok {
 		log.Printf("UNBLOCK: %s", mac)
+		if ap.IsAirPort() {
+			syncAirPortACL(ap, false) // the list in x.S.Blocked no longer has it
+			return
+		}
 		if err := ap.Unblock([]string{mac}); err != nil {
 			log.Printf("unblock: %v", err)
 		}
@@ -877,6 +912,10 @@ func runAction(ap *openwrt.Client, x *device.Session, a string) {
 		}
 	case "block":
 		log.Printf("BLOCK: %d client(s) blocked: %v", len(x.S.Blocked), x.S.Blocked)
+		if ap.IsAirPort() {
+			syncAirPortACL(ap, false)
+			break
+		}
 		if err := ap.EnforceBlocked(x.S.Blocked); err != nil {
 			log.Printf("block: %v", err)
 		}
@@ -1472,7 +1511,7 @@ var lowRSSI = map[string]time.Time{} // first reading below the minimum
 
 const lowRSSIFor = 30 * time.Second
 
-func minRSSIKick(ap *openwrt.Client, s *openwrt.Snapshot) {
+func minRSSIKick(kick func(mac string) error, s *openwrt.Snapshot) {
 	if s == nil {
 		return
 	}
@@ -1510,7 +1549,7 @@ func minRSSIKick(ap *openwrt.Client, s *openwrt.Snapshot) {
 				}
 				if time.Since(lowRSSI[st.MAC]) >= lowRSSIFor {
 					log.Printf("MIN RSSI: %s at %d dBm < %d on %s: disconnecting", st.MAC, st.Signal, m, r.Band)
-					if err := ap.Kick(st.MAC); err != nil {
+					if err := kick(st.MAC); err != nil {
 						log.Printf("min rssi kick: %v", err)
 					}
 					delete(lowRSSI, st.MAC)

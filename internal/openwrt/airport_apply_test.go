@@ -515,8 +515,9 @@ func TestAirPortWidthAndPowerNotedOnce(t *testing.T) {
 			p++
 		}
 	}
-	if w != 1 || p != 1 {
-		t.Errorf("width notes %d, power notes %d, want 1 each: %q", w, p, notes)
+	// power is applied on both radios (ifconfig txpower): no note
+	if w != 1 || p != 0 {
+		t.Errorf("width notes %d, power notes %d, want 1 and 0: %q", w, p, notes)
 	}
 }
 
@@ -991,6 +992,17 @@ channel)
 	echo ${2%%:*} > $S/chan/$p # the device reports the channel number; the width is apart
 	echo "channel $p $2" >> $S/log
 	exit 0;;
+txpower)
+	p=$(cat $S/vap/$v 2>/dev/null) || exit 1
+	echo $2 > $S/txp/$p
+	echo "txpower $p $2" >> $S/ctl
+	exit 0;;
+apbridge|-apbridge)
+	echo "$v $1" >> $S/ctl
+	exit 0;;
+mac:*)
+	echo "$v $1 $2" >> $S/ctl
+	exit 0;;
 esac
 if [ -e $S/vap/$v ]; then
 	p=$(cat $S/vap/$v)
@@ -1004,9 +1016,11 @@ c=$(cat $S/chan/$p 2>/dev/null)
 if [ -z "$c" ]; then
 	if [ $p = bwl0 ]; then c=36; else c=1; fi
 fi
+t=$(cat $S/txp/$p 2>/dev/null); [ -n "$t" ] || t=18.5
 if [ -e $S/run/$v ]; then
 	echo "$v: flags=8843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST> metric 0 mtu 1500"
 	echo "	ssid \"\" channel $c (2437 Mhz 11g ht/20)"
+	echo "	authmode WPA2/802.11i privacy OFF deftxkey 2 txpower $t dotd"
 	echo "	status: running"
 else
 	echo "$v: flags=8822<BROADCAST,SIMPLEX,MULTICAST> metric 0 mtu 1500"
@@ -1051,6 +1065,12 @@ for a; do
 	done
 done
 `,
+	// wl -i VAP assoclist: the stations the test wrote to state/assoc/VAP
+	"wl": `#!/bin/sh
+[ "$1" = -i ] && v=$2 && shift 2
+[ "$1" = assoclist ] && cat $STUB_STATE/assoc/$v 2>/dev/null
+exit 0
+`,
 	// a short real sleep: the script waits for a backgrounded hostapd
 	"sleep": `#!/bin/sh
 exec "$STUB_REAL_SLEEP" 0.2
@@ -1087,7 +1107,7 @@ func newAPStubHost(t *testing.T) *apStubHost {
 		t.Skipf("temporary directory %q has characters the script would not survive unquoted", root)
 	}
 	bin := filepath.Join(dir, "bin")
-	for _, d := range []string{bin, filepath.Join(dir, "state", "vap"), filepath.Join(dir, "state", "run"), filepath.Join(dir, "state", "chan")} {
+	for _, d := range []string{bin, filepath.Join(dir, "state", "vap"), filepath.Join(dir, "state", "run"), filepath.Join(dir, "state", "chan"), filepath.Join(dir, "state", "txp"), filepath.Join(dir, "state", "assoc")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}

@@ -42,6 +42,7 @@ echo "=== phy"; /usr/bin/acp rpc acpd.system.show
 echo "=== netstat"; netstat -ibn
 echo "=== netpkts"; netstat -in
 for r in bwl1 bwl0; do echo "=== radio $r"; ifconfig $r 2>/dev/null; done
+n=0
 for i in $(ifconfig -l); do
   case $i in wlan*) ;; *) continue;; esac
   echo "=== iface $i"; ifconfig $i
@@ -49,9 +50,18 @@ for i in $(ifconfig -l); do
   echo "=== noise $i"; wl -i $i noise
   echo "=== counters $i"; wl -i $i counters
   echo "=== assoc $i"
-  for m in $(wl -i $i assoclist | while read a b; do echo $b; done); do echo "--- $m"; wl -i $i sta_info $m; done
+  for m in $(wl -i $i assoclist | while read a b; do echo $b; done); do
+    echo "--- $m"
+    case $i in wlan1[0-7]|wlan2[0-7]) [ $n -ge ` + apStaInfoMax + ` ] && continue; n=$((n + 1));; esac
+    wl -i $i sta_info $m
+  done
 done
 `
+
+// apStaInfoMax bounds the wl sta_info calls (one per station, on a 1 GHz ARM)
+// of one pass over the daemon's own AP VAPs; a station past it is still
+// listed, with its signal but no counters. The uplink's parent is always read.
+const apStaInfoMax = "64"
 
 var (
 	// ssid HomeNet channel 6 (2437 Mhz 11g ht/20) bssid 02:aa:00:00:00:02
@@ -357,43 +367,66 @@ func parseAirPortRadio(iface string, secs *secMap) (Radio, bool) {
 		st := Station{MAC: strings.ToLower(strings.TrimSpace(mac)), Noise: r.Noise, MHz: r.Width}
 		st.Signal = rssi[st.MAC]
 		st.SignalAvg = st.Signal
-		for _, line := range strings.Split(body, "\n") {
-			line = strings.TrimSpace(line)
-			k, v, ok := strings.Cut(line, ":")
-			f := strings.Fields(line)
-			switch {
-			case len(f) == 3 && f[0] == "idle":
-				st.Inactive = atoi(f[1]) * 1000
-			case len(f) == 4 && f[0] == "in" && f[1] == "network":
-				st.Connected = atoi(f[2])
-			case strings.HasPrefix(line, "state:"):
-				// an AP lists AUTHORIZED once the 4-way handshake is done; the
-				// client side has no such flag for its own AP
-				st.Authorized = strings.Contains(line, "AUTHORIZED") || r.Mode == "Client"
-			case strings.HasPrefix(line, "flags "):
-				st.HT, st.VHT = strings.Contains(line, "N_CAP"), strings.Contains(line, "VHT_CAP")
-			case !ok:
-			case k == "tx data pkts":
-				st.TxPackets = atoi(strings.TrimSpace(v))
-			case k == "tx data bytes":
-				st.TxBytes = atoi(strings.TrimSpace(v))
-			case k == "rx data pkts":
-				st.RxPackets = atoi(strings.TrimSpace(v))
-			case k == "rx data bytes":
-				st.RxBytes = atoi(strings.TrimSpace(v))
-			case k == "tx failures":
-				st.TxFailed = atoi(strings.TrimSpace(v))
-			case k == "rate of last tx pkt":
-				st.TxRate = int(atoi(strings.TrimSuffix(strings.TrimSpace(v), " kbps")))
-			case k == "rate of last rx pkt":
-				st.RxRate = int(atoi(strings.TrimSuffix(strings.TrimSpace(v), " kbps")))
-			}
+		parseStaInfo(&st, body, r.Mode == "Client")
+		if strings.TrimSpace(body) == "" && r.Mode == "Master" {
+			// past the sta_info bound (apStaInfoMax): it is in the association list,
+			// so associated; there is no handshake state to read
+			st.Authorized = true
 		}
 		if st.MAC != "" {
 			r.Stations = append(r.Stations, st)
 		}
 	}
 	return r, true
+}
+
+// apStaSplit cuts a line of `wl sta_info` into its items. The driver prints one
+// item per line, but gaps-device.md shows several on one (separated by three
+// spaces or " / "), so both shapes are read.
+var apStaSplit = regexp.MustCompile(`\s{3,}|\s/\s`)
+
+// parseStaInfo fills st from the text of `wl -i VAP sta_info MAC` (the header
+// line with the MAC is not needed). What the driver gives per station: bytes
+// and packets (data), tx failures, the rates of the last tx and rx packet, idle
+// and connected time, the state and the capability flags. It has no retry count
+// (TxRetries stays 0). client: the station is our own AP, which has no
+// AUTHORIZED flag for us.
+func parseStaInfo(st *Station, body string, client bool) {
+	for _, line := range strings.Split(body, "\n") {
+		for _, seg := range apStaSplit.Split(strings.TrimSpace(line), -1) {
+			seg = strings.TrimSpace(seg)
+			k, v, ok := strings.Cut(seg, ":")
+			v = strings.TrimSpace(v)
+			f := strings.Fields(seg)
+			switch {
+			case len(f) == 3 && f[0] == "idle":
+				st.Inactive = atoi(f[1]) * 1000
+			case len(f) == 4 && f[0] == "in" && f[1] == "network":
+				st.Connected = atoi(f[2])
+			case strings.HasPrefix(seg, "state:"):
+				// an AP lists AUTHORIZED once the 4-way handshake is done; the
+				// client side has no such flag for its own AP
+				st.Authorized = strings.Contains(seg, "AUTHORIZED") || client
+			case strings.HasPrefix(seg, "flags "):
+				st.HT, st.VHT = strings.Contains(seg, "N_CAP"), strings.Contains(seg, "VHT_CAP")
+			case !ok:
+			case k == "tx data pkts":
+				st.TxPackets = atoi(v)
+			case k == "tx data bytes":
+				st.TxBytes = atoi(v)
+			case k == "rx data pkts":
+				st.RxPackets = atoi(v)
+			case k == "rx data bytes":
+				st.RxBytes = atoi(v)
+			case k == "tx failures":
+				st.TxFailed = atoi(v)
+			case k == "rate of last tx pkt":
+				st.TxRate = int(atoi(strings.TrimSuffix(v, " kbps")))
+			case k == "rate of last rx pkt":
+				st.RxRate = int(atoi(strings.TrimSuffix(v, " kbps")))
+			}
+		}
+	}
 }
 
 // normMAC pads a MAC printed without leading zeros (2:bb:0:0:0:1).
