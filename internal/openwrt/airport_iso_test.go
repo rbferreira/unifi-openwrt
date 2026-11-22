@@ -56,19 +56,34 @@ func TestAirPortPFScriptRefuses(t *testing.T) {
 		{"uplink as bridge", []PFIso{{"wlan12", "wlan5"}}},
 		{"twice", []PFIso{{"wlan12", "bridge0"}, {"wlan12", "bridge0"}}},
 	} {
-		if s, err := AirPortPFScript(nil, tc.iso); err == nil {
+		_ = tc.name
+		if s, err := AirPortPFScript(nil, tc.iso, nil); err == nil {
 			t.Errorf("%s: accepted:\n%s", tc.name, s)
 		}
 	}
 }
 
+func TestAirPortPFScriptRefusesAll(t *testing.T) {
+	iso := []PFIso{{"wlan12", "bridge0"}}
+	for _, all := range [][]string{{"wlan0"}, {"wlan5"}, {"wlan12;reboot"}, {"wlan9"}} {
+		if s, err := AirPortPFScript(nil, iso, all); err == nil {
+			t.Errorf("%q accepted:\n%s", all, s)
+		}
+	}
+	// with nothing isolated the list is not used at all
+	s, err := AirPortPFScript(nil, nil, []string{"wlan11"})
+	if err != nil || strings.Contains(s, "sta wlan") {
+		t.Errorf("limits only: %v", err)
+	}
+}
+
 func TestAirPortPFScriptShape(t *testing.T) {
 	iso := []PFIso{{"wlan12", "bridge77"}, {"wlan21", "bridge77"}, {"wlan22", "bridge0"}}
-	s, err := AirPortPFScript([]PFLimit{{"wlan11", 2000}}, iso)
+	s, err := AirPortPFScript([]PFLimit{{"wlan11", 2000}}, iso, pfAll)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, w := range []string{"lim wlan11 2000Kb\nblk wlan12 bridge77\nblk wlan21 bridge77\nblk wlan22 bridge0\nif [ $n -eq 0 ] && [ $m -eq 0 ]",
+	for _, w := range []string{"lim wlan11 2000Kb\nblk wlan12 bridge77\nblk wlan21 bridge77\nblk wlan22 bridge0\nsta wlan10\nsta wlan11\nsta wlan12\nsta wlan20\nsta wlan21\nsta wlan22\nif [ $n -eq 0 ] && [ $m -eq 0 ]",
 		"brconfig $b ipf", "brconfig $b -ipf"} {
 		if !strings.Contains(s, w) {
 			t.Errorf("script lacks %q", w)
@@ -101,34 +116,62 @@ func TestAirPortPFScriptShape(t *testing.T) {
 	}
 }
 
-// The ruleset for each mix: queues, pass all, then the blocks of the running
-// isolated VAPs, in that order.
+// isoBlock is the four lines of one isolated VAP; tagRules the tagging that
+// precedes them: pass in all as uplink, then every running VAP as a client.
+func isoBlock(v string) string {
+	return "block out on " + v + " all\n" +
+		"pass out on " + v + " tagged UOWUP\n" +
+		"pass out on " + v + " inet proto udp from any port 67 to any port 68\n" +
+		"pass out on " + v + " inet6 proto icmp6 all icmp6-type { routeradv, neighbrsol, neighbradv }\n"
+}
+
+func tagRules(running ...string) string {
+	s := "pass in all tag UOWUP\n"
+	for _, v := range running {
+		s += "pass in on " + v + " all tag UOWSTA\n"
+	}
+	return s
+}
+
+// The ruleset for each mix: queues, pass all, then (only with an isolated VAP)
+// the tagging of every running VAP and the four rules of each isolated one, in
+// that order.
 func TestAirPortPFRuleset(t *testing.T) {
 	lim := []PFLimit{{"wlan11", 2000}}
 	iso := []PFIso{{"wlan12", "bridge77"}, {"wlan21", "bridge77"}}
 	limRules := "altq on wlan11 hfsc bandwidth 1Gb queue { lim_wlan11 }\n" +
 		"queue lim_wlan11 bandwidth 2000Kb hfsc(default upperlimit 2000Kb)\n"
-	isoRules := "block out on wlan12 all\nblock out on wlan21 all\n"
+	isoRules := isoBlock("wlan12") + isoBlock("wlan21")
+	tags := tagRules("wlan11", "wlan12", "wlan21")
 	for _, tc := range []struct {
 		name   string
 		lims   []PFLimit
 		iso    []PFIso
+		up     []string
 		ours   bool // the unit already has a ruleset of ours
 		rules  string
 		report []string
 		off    bool
 	}{
-		{"limits only", lim, nil, false, limRules + "pass all\n", []string{"pf: 1 limited VAP(s)"}, false},
-		{"isolation only", nil, iso, false, "pass all\n" + isoRules,
+		{"limits only: no tags", lim, nil, nil, false, limRules + "pass all\n", []string{"pf: 1 limited VAP(s)"}, false},
+		{"isolation only", nil, iso, nil, false, "pass all\n" + tags + isoRules,
 			[]string{"bridge77: ipf on", "pf: 2 isolated VAP(s)"}, false},
-		{"both", lim, iso, false, limRules + "pass all\n" + isoRules,
+		{"both", lim, iso, nil, false, limRules + "pass all\n" + tags + isoRules,
 			[]string{"bridge77: ipf on", "pf: 1 limited VAP(s), 2 isolated VAP(s)"}, false},
-		{"neither, our file there", nil, nil, true, "", []string{"pf: off"}, true},
-		{"neither, no file", nil, nil, false, "", nil, false},
+		{"one WLAN on two radios among others, all tagged", lim, iso,
+			[]string{"wlan10", "wlan11", "wlan12", "wlan20", "wlan21", "wlan22", "bridge77"}, false,
+			limRules + "pass all\n" + tagRules("wlan10", "wlan11", "wlan12", "wlan20", "wlan21", "wlan22") + isoRules,
+			[]string{"bridge77: ipf on", "pf: 1 limited VAP(s), 2 isolated VAP(s)"}, false},
+		{"neither, our file there", nil, nil, nil, true, "", []string{"pf: off"}, true},
+		{"neither, no file", nil, nil, nil, false, "", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newPFHost(t)
-			h.up("wlan11", "wlan12", "wlan21", "bridge77")
+			up := tc.up
+			if up == nil {
+				up = []string{"wlan11", "wlan12", "wlan21", "bridge77"}
+			}
+			h.up(up...)
 			if tc.ours {
 				h.runPF(lim, iso)
 			}
@@ -163,9 +206,11 @@ func TestAirPortPFRuleset(t *testing.T) {
 				if !h.has("s/enabled") {
 					t.Error("pf not enabled")
 				}
-				for _, v := range tc.iso {
-					if !h.has("run/" + v.VAP + ".pfq") {
-						t.Errorf("no marker for %s", v.VAP)
+				// a marker for every VAP the ruleset names, tagged ones too
+				for _, v := range up {
+					want := strings.HasPrefix(v, "wlan") && (len(tc.iso) > 0 || v == "wlan11")
+					if want && !h.has("run/"+v+".pfq") {
+						t.Errorf("no marker for %s", v)
 					}
 				}
 			}
@@ -210,6 +255,30 @@ func TestAirPortPFIsolationRun(t *testing.T) {
 				t.Errorf("unneeded call %q", c)
 			}
 		}
+	})
+	t.Run("a VAP created later (not isolated) is tagged: the ruleset loads again", func(t *testing.T) {
+		h.up("wlan10", "wlan12", "wlan21", "bridge77")
+		rep, calls := h.runPF(nil, iso)
+		if !reflect.DeepEqual(rep, []string{"pf: 2 isolated VAP(s)"}) || !h.has("run/wlan10.pfq") {
+			t.Errorf("report %q", rep)
+		}
+		if !strings.Contains(h.text("run/pf.conf"), "pass in on wlan10 all tag UOWSTA\n") {
+			t.Errorf("pf.conf:\n%s", h.text("run/pf.conf"))
+		}
+		loaded := false
+		for _, c := range calls {
+			loaded = loaded || strings.HasPrefix(c, "pfctl -f")
+		}
+		if !loaded {
+			t.Error("ruleset not loaded")
+		}
+		// and a tagged VAP that was recreated loads it again, with no text change
+		os.Remove(filepath.Join(h.dir, "run", "wlan10.pfq"))
+		if rep, _ := h.runPF(nil, iso); len(rep) != 1 || !h.has("run/wlan10.pfq") {
+			t.Errorf("recreated: %q", rep)
+		}
+		h.up("wlan12", "wlan21", "bridge77")
+		h.runPF(nil, iso)
 	})
 	t.Run("a recreated isolated VAP gets its rule back", func(t *testing.T) {
 		os.Remove(filepath.Join(h.dir, "run", "wlan21.pfq"))
@@ -386,12 +455,12 @@ func TestAirPortBridgeIPF(t *testing.T) {
 // The apply script already forgets .pfq when it stops or starts a VAP; an
 // isolated VAP uses that same marker, so a recreated one gets its block again.
 func TestAirPortIsolationMarkerIsPFQ(t *testing.T) {
-	s, err := AirPortPFScript(nil, []PFIso{{"wlan12", "bridge0"}})
+	s, err := AirPortPFScript(nil, []PFIso{{"wlan12", "bridge0"}}, pfAll)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(s, "for v in $w $wi; do [ -e $D/$v.pfq ] || need=1; done") ||
-		!strings.Contains(s, "for v in $w $wi; do : > $D/$v.pfq; done") {
+	if !strings.Contains(s, "for v in $w $wi $ws; do [ -e $D/$v.pfq ] || need=1; done") ||
+		!strings.Contains(s, "for v in $w $wi $ws; do : > $D/$v.pfq; done") {
 		t.Error("isolated VAPs do not use the .pfq marker")
 	}
 }

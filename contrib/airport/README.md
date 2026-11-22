@@ -21,7 +21,7 @@ which, feature by feature.
 | WLANs | the ones the console assigns to the AP, up to 8 per band, open or WPA2 personal: one hostapd each, started by the daemon |
 | LAN ports | bridged to the uplink |
 | In the console | adopted as a UAP-AC-Pro (`U7PG2`): radios, WLANs, clients with signal, rates, bytes and packets, packet, retry and error counters per radio, the wireless uplink and its parent, ports, CPU and memory, the neighbour scan; Restart, Reconnect, Block and Locate work |
-| From the console to the unit | channel and width, transmit power, DTIM, client limit, hidden SSID, MAC filters and blocked clients, client isolation, schedules, an automatic channel, remote syslog: see the table below for the state of each |
+| From the console to the unit | channel and width, transmit power, DTIM, client limit, hidden SSID, MAC filters and blocked clients, client isolation, a download limit per WLAN, WLANs on a VLAN, schedules, an automatic channel, remote syslog: see the table below for the state of each |
 | Depends on | nothing but the base station: no second host |
 | Survives | reboot and power loss: back on the mesh about 2 minutes after power-on, with the WLANs rebuilt from the last configuration kept on flash |
 
@@ -216,8 +216,10 @@ nothing in the base station's stored configuration.
 2. Unpacks the daemon from `flash1` into the RAM disk and checks its size; restores the
    adoption state saved on flash into the daemon's RAM state directory; saves `hostap.seed`
    if it is not there yet.
-3. With no link on the WAN port for 20 s: creates a client VAP on `bwl0`, starts
-   `wpa_supplicant`, waits for the association, adds the VAP to `bridge0`.
+3. With no link on the WAN port for 20 s: removes the `vlanN` interfaces the daemon put on the
+   uplink (they would lose their parent), creates a client VAP on `bwl0`, starts
+   `wpa_supplicant`, waits for the association, adds the VAP to `bridge0`. The daemon builds
+   the VLAN interfaces again on the new uplink within a minute.
 4. Every 5 s: a cable with link on the WAN port removes the wireless uplink (a wired uplink
    and a wireless one together are a loop); an uplink that is not associated for 60 s is torn
    down and tried again; the daemon is started once the bridge has an address (with
@@ -268,34 +270,40 @@ configuration file. Four states, and the third column says what was and was not 
 | Hidden SSID | built | Rendered as `hide_ssid`; not tried with a client |
 | WPA3, WPA2/WPA3, PMF, 802.11r, 802.11v | not possible | The Broadcom driver does authentication and association itself, so hostapd only sees events and has no management-frame path, which SAE, FT and BSS transition need. `wl` answers "Operation not supported" to `mfp`, `mfp_config`, `mfp_sha256`, `fbt`, `wnm` and `sae_password`, `wpa_auth` knows only WPA and WPA2 PSK, and `wl cap` lists none of them. The firmware's hostapd (0.6.5) rejects the keys; a hostapd 2.11 cross-built for the unit would add nothing. These WLANs are left off, never downgraded, and a required PMF is logged |
 | WPA-Enterprise | not done | The WLAN is left off with a note |
-| Guest networks, WLANs on a VLAN | not done | Left off with a note. A VLAN interface on top of a VAP, and on the uplink VAP, was created and destroyed without disturbing anything, and a second bridge works; no frame was sent through either, because the network under test has no VLAN. Isolating a guest network from the LAN would need `pf` on the bridge: also untried |
+| WLAN on a VLAN, behind the mesh uplink | works | A WLAN of the console on VLAN 77 came up on both radios: the daemon creates `vlan77` on the uplink VAP (802.1Q) and `bridge77`, and puts the WLAN's VAP in that bridge. A client got an address from the VLAN's gateway, the console listed it on that network, and a download ran at 27 Mbit/s; the uplink and the other WLANs were not disturbed. The VLAN interfaces are checked once a minute, because `up.sh` destroys them when it recreates the uplink and the daemon builds them again. Ids 2 to 4094 |
+| WLAN on a VLAN, wired uplink | not done | Left off with a note. The unit has no per-VAP VLAN tag, so the tagging has to be an interface on the uplink, and which one that is on the WAN port was not measured |
+| Guest WLAN, with the site's captive portal | not possible | Left off with a note (seen). The portal has to hold back unauthorised guests, which means matching the guest's MAC address, and `pf` here matches addresses and ports only. An authorisation by IP on the way out to the uplink would be needed: not built |
+| Guest WLAN, no portal | built | Allowed only on a VLAN, with isolation forced on, so that the gateway does the restricting; on the LAN it is left off with a note. Not exercised: the portal is a site-wide setting and was on at the console under test |
 | **Channel and radio** | | |
 | 2.4 GHz channel | works | Changed from the console to 11, to 1 and back to auto, each applied within seconds; the 5 GHz WLAN and the uplink untouched |
 | 2.4 GHz width | not possible | The radio stays at 20 MHz whatever is asked: `6:ht/40` is accepted and nothing changes |
 | 5 GHz channel behind the mesh uplink | works | The radio follows the uplink's channel and width; a different channel asked for is logged. The uplink coming back by itself with the WLANs behind it was seen. The parent moving to another channel has not been seen |
 | 5 GHz channel and width with no mesh uplink | works | Seen with the uplink removed by hand and the daemon's copy of the configuration edited: channel 44 at 20, 40 and 80 MHz, a width-only change included. 80 MHz is the most applied. Not seen with a cable on the WAN port, which is the real case |
-| Automatic channel | built | `acs=1` is not relied on (see below). From the neighbour scan the daemon picks the least-interfered of 1, 6 and 11 on 2.4 GHz, or of the non-DFS 5 GHz channels when there is no uplink, and holds it 4 hours; a held radio is moved only while it has no client. The first pass had no scan results yet; the choice itself has not been seen. Behind a mesh uplink the 5 GHz radio follows the uplink |
+| Automatic channel | works | `acs=1` is not relied on (see below). From the neighbour scan the daemon picks the least-interfered of 1, 6 and 11 on 2.4 GHz, or of the non-DFS 5 GHz channels when there is no uplink, and holds it 4 hours; a held radio is moved only while it has no client. Seen on 2.4 GHz with the radio on auto: `chose 1 from the neighbour scan (9 networks; cost 1:46.2 6:491.7 11:238.6; was on 11)`, then `staying on 1`. The no-uplink 5 GHz case was not seen. Behind a mesh uplink the 5 GHz radio follows the uplink |
 | Transmit power | built | `ifconfig VAP txpower N` moves the radio, not hostapd's `tx_power` (no effect) or `wl pwr_percent` (reads back, changes nothing). By hand on the 5 GHz radio with the uplink: 21 to 15 dBm, the uplink stayed associated. A value above the radio's own is cut to it. hostapd puts the default back a moment after a VAP starts, so the daemon waits 6 s after a radio restart; that wait has not been re-tested |
 | DTIM, client limit | works | Rendered into the hostapd config (the console sends DTIM 1 on 2.4 GHz). Their effect on the air, and the limit with two clients, were not measured. The driver's limit per WLAN is 64 |
-| Minimum RSSI | built | A client below the radio's minimum on every reading for 30 s is disconnected (the same code as on OpenWrt). Not seen: it needs a weak client. Refusing a weak client at association is not done |
-| Band steering | built | "Prefer 5 GHz" only, off on the console so far. A client that has just joined on 2.4 GHz, was seen on 5 GHz, and has a good signal is kicked and denied on 2.4 GHz for 10 s, at most 3 times per 6 h. Load balancing is not steering: its client limit becomes the limit above |
+| Minimum RSSI | works | A client below the radio's minimum on every reading for 30 s is disconnected (the same code as on OpenWrt). Seen with a minimum of -67 dBm on the 2.4 GHz radio and the client's transmit power at 1 dBm: `MIN RSSI: <mac> at -81 dBm < -67 on ng: disconnecting`, twice, 77 s apart. Refusing a weak client at association is not done |
+| Band steering | built | "Prefer 5 GHz" only; disabled on the console under test, so never exercised. A client that has just joined on 2.4 GHz, was seen on 5 GHz, and has a good signal is kicked and denied on 2.4 GHz for 10 s, at most 3 times per 6 h. Load balancing is not steering: its client limit becomes the limit above |
 | Channel utilization | not possible | `chanim_stats` panics the kernel; `cca_get_stats`, `itfr_get_stats`, `pktq_stats` and `rate_histo` are not supported. Only frame counters exist, and any percentage from them would be invented |
 | Country | not possible | Read-only on this unit: the regulatory domain is fixed by the `sku` and `region` of the unit. The daemon reports it and logs a note when the console asks for another |
 | **Clients** | | |
 | Reconnect | works | `wl deauthenticate`; the client's time in the network dropped (141 s to 38 s) and it came back by itself |
 | Block, unblock | works | The MAC joins the driver ACL of every WLAN, is kicked, and leaves the client list; unblock removes it and the client reassociated. Immediate, no restart |
-| MAC filter, clients locked to another AP | works | The deny lists the console sends are applied as the driver ACL of every VAP. An allow-list filter is built, not seen |
-| Client isolation | works | The driver flag is set and read back (`ap_isolate` 1, and back to 0). That it keeps two clients apart is built, not seen: it needs two wireless clients on one WLAN |
+| MAC filter, clients locked to another AP | works | The deny lists the console sends are applied as the driver ACL of every VAP. Allow mode: with a list that left the test client out it was kicked and stayed out; with it in the list it came back |
+| Client isolation, one radio | works | The driver flag (`ap_isolate`) keeps two clients of one VAP apart: a PC and a Pi on the 2.4 GHz VAP, isolation on, the PC reached the gateway and not the Pi (3 of 3 and 0 of 3); off from the console, both reached |
+| Client isolation, across radios | works | The driver isolates inside one BSS only, and the bridge still forwards between two VAPs: with the flag alone a PC on 5 GHz reached a Pi on 2.4 GHz. The daemon adds a `pf` ruleset on the bridge, see [pf](#pf) below. Measured with it: client to gateway 3 of 3, to a client on the other radio 0 of 3, to a wired host on the LAN 3 of 3, internet download fine, a fresh DHCP lease on both VAPs, the home LAN to the client 3 of 3. Wired hosts stay reachable; only the WLAN's clients are kept apart |
 | Per-client counters | works | Signal, rates, bytes, packets and time in network, from `wl sta_info`. `tx_retries` is 0 and `tx_failed` empty: the driver has no per-station retry count, so the experience score sees the PHY rate only. Retries and errors are reported per radio, from `wl counters` |
 | Neighbour scan | works | 7 networks scanned on 2.4 GHz and 9 read from the cache on 5 GHz; the console lists the neighbours. Clients stayed up through a scan. 5 GHz is never scanned while the uplink is on it: only the results the driver already holds |
-| Schedules | built | The daemon leaves a WLAN out of the VAP list outside its hours, in the time zone the controller sent, and applies again when a boundary passes. No schedule exists on the console yet. With no readable time zone the WLANs stay on |
-| Rate limits | not done | Measured feasible with `pf` and `altq` (cbq): a 2 Mbit queue on a VAP took a download from about 40 to 1.8 Mbit/s, and per-client limits in both directions classified packets with the same queue name on the VAP and on the uplink. But the rates are inaccurate (2 Mbit gave 3.6, 1 Mbit gave 0.9 once and 5 once) and a queue on the uplink slowed unqueued traffic through it (a wired client from 9.7 to 2.3 MB/s). Needs tuning or another discipline before any code; the daemon does not limit anything |
+| Schedules | works | The daemon leaves a WLAN out of the VAP list outside its hours, in the time zone the controller sent, and applies again when a boundary passes. Seen: a window that excluded the current time took both VAPs of the lab WLAN off within a minute, and removing the schedule brought them back. With no readable time zone the WLANs stay on |
+| Download limit (user group) | works | A cap on the WLAN's VAP, shared by the WLAN's clients: none gets more than the limit, and each gets less when several are active. An `altq` hfsc queue with every packet in its default class, loaded through `pf` (see [pf](#pf)). A user group of 2000 kbit/s gave 221753 B/s, 1.77 Mbit/s, from the console; asked by hand 2 Mbit gave 1.76, and an unlimited wired client kept its 10 MB/s. A limit of 1 Gbit/s or more is not applied |
+| Download limit per client | not possible | Classifying one client's download leaks about half the bytes: 2 Mbit asked gave 3.85, 1 Mbit gave 1.57, steadily. Frames arrive from the mesh uplink aggregated (about 3 KB per packet in `pfctl -ss -v`); when one is split for the VAP the tag `pf` put on it stays on the first segment only, and the second falls in the default class. No `pf` rule changes that |
+| Upload limit | not done | Ignored with a note (3.5 MB/s measured with a limit set). Per client it classifies well (1 Mbit asked, 0.94 delivered) but needs a queue on the uplink, and any queue on the mesh uplink slows everybody: an unlimited wired client fell from 9.7 to 5.3 MB/s with hfsc and to 2.3 with cbq. On a wired uplink (a queue on the Ethernet port) it was not tried |
 | **Device** | | |
 | Restart | works | The VAPs are rebuilt from the saved configuration when the unit is back |
 | Locate | works | From the console the LED alternates amber and green every second, and goes back |
 | LED states | works | The console's steady blue or green shows as green; white, red, orange and yellow show as amber. The unit has three states only (its own, amber, green), so "LED off" is not possible: it is noted and the LED left alone |
-| Temperatures and fan | built | `envstat` is read (four board sensors, the fan and its duty). The console kept `has_temperature` and `has_fan` and showed no value; the daemon now sends the scalar and the array form, not yet checked in the console |
-| Ports | built | Every PHY is reported, with or without link (four seen, a client's at 100 Mbit/s). There are no counters per port, so they go to the first port with link |
+| Temperatures and fan | built | `envstat` is read (four board sensors, the fan and its duty) and sent, as a scalar and as an array. The console stores `has_temperature` and `has_fan` as true and shows no value for this model, so nothing is visible there |
+| Ports | works | Every PHY is reported, with or without link (four seen, a client's at 100 Mbit/s). With a wireless uplink no jack is marked as the uplink (a wired client's port was once shown as it). There are no counters per port, so they go to the first port with link |
 | Remote syslog | works | The daemon forwards its own log and the hostapd logs of its VAPs, as RFC 3164 over UDP to the controller's target (20 lines reached the log server within 10 minutes). The unit has no syslogd, and the base station's own log ring is not forwarded. The controller's encrypted intake is built, not seen |
 | NTP, time zone | not done | The unit keeps its own `sntpd` server and zone; the request is logged. The time zone is still used for schedules |
 | Firmware, capability words | works | The real firmware version is reported in a field of its own (the `version` the controller upgrades from stays the model's). The WPA3 bit is cleared. The 802.11k, v and r bits are still claimed: there is no table of their positions |
@@ -325,14 +333,39 @@ that does not say so starts on channel 36 and drags the uplink along.
   the unit, that what it applied is still running. It applies again when a WLAN is not
   running, when the 5 GHz uplink changed channel (`up.sh` takes the 5 GHz VAPs down around
   such a change), when a schedule boundary has passed, or when an automatic channel is due a
-  second look; otherwise it only re-checks the ACLs. A configuration push from the controller
+  second look; otherwise it only re-checks the ACLs, the VLAN interfaces and bridges, and the
+  `pf` ruleset. A configuration push from the controller
   applies at once.
+- **WLANs on a VLAN.** A WLAN on VLAN N has its VAP in `bridgeN` together with `vlanN`, an
+  802.1Q interface on the mesh uplink VAP: the unit has no per-VAP tag, so the uplink is the
+  only way out. The daemon creates only `vlanN` and `bridgeN` (N from 2 to 4094), keeps their
+  names, removes the ones nobody wants any more, and never touches `bridge0`. With a wired
+  uplink there is nothing to tag on yet, and such a WLAN is left off with a note. A guest WLAN
+  is allowed only on a VLAN, with isolation forced on.
+- <a id="pf"></a>**pf.** The base station's `pf` is off, and its stored ruleset is `block drop
+  all`. When a download limit or an isolated WLAN needs it, the daemon loads a ruleset of its
+  own *first* and enables `pf` only after that load succeeded; when nothing needs it any more
+  it disables `pf` and flushes the rules, but only if the ruleset in force is its own (a file
+  in its state directory is the proof). The ruleset: for a limit, `altq on VAP hfsc bandwidth
+  1Gb queue { lim }` and `queue lim bandwidth X hfsc(default upperlimit X)`; for isolation
+  (`brconfig BRIDGE ipf` on the bridge, set only where the daemon found it off), `pass in all
+  tag UOWUP` on everything, `pass in on <each VAP of the daemon> all tag UOWSTA` so that a
+  frame from any client loses the first tag, and for each isolated VAP `block out`, `pass out
+  tagged UOWUP`, the DHCP replies (udp 67 to 68) and ICMPv6 router and neighbour messages;
+  ARP is not IP and passes. What the simpler rule sets did: `pass all` plus `block out on VAP`
+  also blocked the DHCP replies and every flow opened from the uplink side (a new client got no
+  address); tagging everything on input let client-to-client traffic through, because `pf`
+  keeps a state per direction and a tag set on input is lost when the bridge copies a broadcast
+  frame for each member. The earlier belief that `pf`'s input hook does not run on a VAP was
+  wrong (3504 packets were counted `in on wlan21`). Because that hook runs, filtering what a
+  guest may reach (`block in on VAP to <ranges>`) is possible; a captive portal still is not,
+  since `pf` cannot match a MAC address.
 - **An empty configuration is refused.** `system_cfg.txt` with no radio section (any index) is
   an empty or cut-short file, not "no WLANs": applying it would take every WLAN off the air,
   as happened once with a file truncated by a full RAM disk. The daemon logs it and applies
   nothing.
-- **Never outside its names.** Only `wlan10`..`wlan17` and `wlan20`..`wlan27` are created,
-  stopped or destroyed, and a VAP name, parent, MAC or SSID is checked before it reaches a
+- **Never outside its names.** Only `wlan10`..`wlan17`, `wlan20`..`wlan27` and the `vlanN` and
+  `bridgeN` of the WLANs on a VLAN are created, stopped or destroyed, and a VAP name, parent, MAC or SSID is checked before it reaches a
   shell. There is no timed rollback as on OpenWrt: nothing the applier does can cut the
   daemon off from the controller.
 
@@ -377,8 +410,10 @@ Measured on the unit, and the reason for all of it:
   not at each change.
 - **Never run `wl … chanim_stats`.** It panics the kernel on both radios. Once the unit rebooted
   and came back on its own; the second time it did not come back by itself.
-- **Do not enable `pf` with the stored ruleset.** It is `block drop all`: it would cut SSH and
-  the uplink. A rate limiter or a guest filter must load a ruleset of its own first.
+- **Never enable `pf` by hand without loading a ruleset first.** The stored one is `block drop
+  all`: enabling `pf` with it cuts SSH and the uplink. The daemon loads its own ruleset before it
+  enables `pf`, and turns `pf` off again when no limit or isolation needs it; by hand, run
+  `pfctl -f` with a ruleset that passes everything, and only then `pfctl -e`.
 - **Mind the RAM disk.** `/mnt/Memory` is 16 MB and holds the daemon (9 MB), its log and the
   VAPs' files. A script that writes the daemon's state must check every copy it makes.
 - Leave both radios off in the stored configuration. A WLAN of the firmware's own on a radio
@@ -392,6 +427,8 @@ Measured on the unit, and the reason for all of it:
 | The firmware's `wpa_supplicant`, and its "join a network" mode | broken, see step 2 |
 | WPA3, PMF, 802.11r and v, channel utilization, a country of another domain, a dark LED | see the table: the driver or the hardware does not allow them |
 | Per-client retry counters | `wl sta_info` on this driver has none |
+| A per-client download limit, and an upload limit | see the table: `pf` loses half the bytes of a client's download, and a queue on the mesh uplink slows everybody |
+| A captive portal for a guest WLAN | `pf` cannot match a MAC address; the WLAN stays off |
 | A VAP's MAC address | `wlanaddr` and `wlanbssid` are ignored: the driver numbers the BSSIDs itself, one per VAP |
 | `wl dwds_config enable sta <bssid>` | not needed, and after it (together with a test bridge) the link stopped passing traffic until the supplicant was restarted |
 | `ifconfig wlanN inet A.B.C.D netmask …` | `SIOCAIFADDR: Invalid argument`; the firmware uses the `alias` form |
@@ -406,7 +443,7 @@ both bands, each with a ping in both directions and a download; a wired host on 
 learning the real MAC of a client behind the base station; adoption; a phone on the real SSID
 showing in the console with the same signal and rates the base station reports.
 
-With `-apply`: two WLANs on 2.4 GHz and one on 5 GHz brought up from the configuration on
+With `-apply`, in the first round: two WLANs on 2.4 GHz and one on 5 GHz brought up from the configuration on
 flash at boot; a client authenticating with WPA2 and getting an address on a WLAN rendered
 from scratch; the 2.4 GHz channel changed from the console (to 11, to 1, back to auto), each
 applied within seconds, the 5 GHz WLAN and the uplink untouched; with the uplink taken away
@@ -418,17 +455,29 @@ signal, rates, bytes, packets and time in network; the isolation flag; the neigh
 (clients up through it); Locate; remote syslog reaching the log server; the refusal of an
 empty configuration; and the update script described above.
 
-Built and flashed, but not yet seen on the unit: the minimum RSSI disconnect, the allow-list
-MAC filter, isolation actually separating two clients, the transmit power wait after a radio
-restart, schedules, the chosen automatic channel, band steering, the table of all ports,
-temperatures and fan in the console, the encrypted syslog intake, and `uow -dump`, `owctl`,
-`owplan` and `owprobe` against the unit.
+Later, with a PC and a Pi as clients and a WLAN of the lab on the console (VLAN 77, a user
+group of 2000 kbit/s down, an AP group of the unit alone): the WLAN on the VLAN on both radios
+with an address from the VLAN's gateway; the download cap, 1.77 Mbit/s; the MAC filter in allow
+mode, kicking the client left out of the list and letting it back; a schedule window that took
+both VAPs off and back; the automatic channel choosing 1 and then staying; the minimum RSSI
+disconnecting a client at -81 dBm; client isolation on one radio, and across the two radios
+with the `pf` rules above, each with the PC and the Pi pinging the gateway, each other and a
+wired host.
 
-Not tested: a cable on the WAN port (the wired-uplink branch of `up.sh`), and so the 5 GHz
-radio with no uplink on a real unit rather than by hand; the parent changing channel; an open
-WLAN and a hidden one through the console; any other AirPort model; a parent that is not a
-UniFi AP. Not done: guest networks and VLANs, rate limits, device logins, SNMP, NTP and the
-time zone, mesh credentials from the console.
+Built and flashed, but not yet seen on the unit: band steering (disabled on the console under
+test), a guest WLAN without the portal, the transmit power wait after a radio restart, the
+encrypted syslog intake, temperatures and fan in the console (it shows no value for this
+model), and `uow -dump`, `owctl`, `owplan` and `owprobe` against the unit.
+
+Not tested: a cable on the WAN port (the wired-uplink branch of `up.sh` as a whole, and so
+the 5 GHz radio with no uplink on a real unit rather than by hand); the parent changing
+channel; an open WLAN and a hidden one through the console; any other AirPort model; a
+parent that is not a UniFi AP.
+
+Not done, as the table says: a per-client download limit (not possible with `pf`) and an upload
+limit; WLANs on a VLAN and guest networks with a wired uplink; a captive portal; mesh
+credentials kept in sync from the console, and serving mesh children; device logins; SNMP; NTP
+and the time zone; 802.11k neighbour lists.
 
 ## Undo
 

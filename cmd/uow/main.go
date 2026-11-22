@@ -772,7 +772,7 @@ func syncAirPortPF(ap *openwrt.Client, first bool) {
 		return
 	}
 	airportPFTouch = len(airportLimits) > 0 || len(airportIso) > 0
-	lines, err := ap.SyncAirPortPF(airportLimits, airportIso)
+	lines, err := ap.SyncAirPortPF(airportLimits, airportIso, openwrt.AirPortVAPNames(airportVAPs))
 	for _, l := range lines {
 		log.Printf("  airport: %s", l)
 	}

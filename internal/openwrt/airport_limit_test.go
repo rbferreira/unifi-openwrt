@@ -257,7 +257,7 @@ func (h *pfHost) run(lims []PFLimit) (report []string, pfctl []string) {
 // runPF is run with isolated VAPs too.
 func (h *pfHost) runPF(lims []PFLimit, iso []PFIso) (report []string, pfctl []string) {
 	h.t.Helper()
-	s, err := AirPortPFScript(lims, iso)
+	s, err := AirPortPFScript(lims, iso, pfAll)
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -422,3 +422,7 @@ func TestAirPortLimitsRun(t *testing.T) {
 		}
 	})
 }
+
+// pfAll is every VAP the "daemon" has in these tests; the stub's "up" file says
+// which of them run.
+var pfAll = []string{"wlan10", "wlan11", "wlan12", "wlan20", "wlan21", "wlan22"}

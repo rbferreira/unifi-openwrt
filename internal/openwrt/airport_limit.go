@@ -97,11 +97,27 @@ func sortedKeys(m map[string]bool) string {
 // keeps the clients of one VAP apart, but the two VAPs of a WLAN (one per
 // radio) share a bridge, and the bridge forwards between them. pf stops that
 // without knowing an address: with "ipf" on the bridge, pf sees the bridged
-// frames; a flow from the uplink side (or one a client opened toward it) has a
-// state and passes on its way out of the VAP, while a frame from another VAP
-// has none and meets "block out on VAP all". ARP is not IP and is not filtered.
-// Wired hosts stay reachable. It needs pf, so it shares the ruleset (and the
-// switch) of the download limits.
+// frames, on input too (its input hook DOES run on the VAPs). Measured on the
+// unit: "pass all" plus "block out on VAP all" is not enough. pf keeps a state
+// per direction, so a packet that came in from the uplink has none on its way
+// out of the VAP: a fresh client got no DHCP answer and nothing opened from the
+// wired side reached a client. So the packet is tagged on the way in and the
+// block lets the tag through:
+//
+//	pass in all tag UOWUP                  everything (the uplink side)
+//	pass in on VAP all tag UOWSTA          every VAP of the daemon, isolated or
+//	                                       not: it overrides UOWUP, so a frame
+//	                                       from any client has no UOWUP
+//	block out on ISO all                   then, for each isolated VAP: block,
+//	pass out on ISO tagged UOWUP           let what came from the uplink in,
+//	pass out on ISO ... port 67 to 68      and DHCP replies and the three
+//	pass out on ISO inet6 ... icmp6        ICMPv6 types IPv6 needs: a tag set
+//	                                       on input is lost on broadcast frames
+//	                                       (the bridge copies them per member)
+//
+// The last matching rule wins, hence the order. ARP is not IP and is not
+// filtered. Wired hosts stay reachable, both ways. It needs pf, so it shares the
+// ruleset (and the switch) of the download limits.
 
 // PFIso is one isolated VAP and the bridge it is in.
 type PFIso struct {
@@ -150,16 +166,18 @@ func apBridgeName(b string) bool {
 // apPFHead builds the ruleset in $T from the capped VAPs that run (an altq
 // needs its interface) and the isolated ones, then loads it only when
 // something is to change. pf is the unit's own and was off, with a stored
-// ruleset of "block drop all": our ruleset (queues, "pass all", then the
-// "block out on VAP all" of the isolated VAPs: the last matching rule wins) is
-// loaded BEFORE pf is enabled, and pf is never enabled after a failed load.
+// ruleset of "block drop all": our ruleset (queues, "pass all", then, when a
+// VAP is isolated, the tagging and blocking rules above: the last matching rule
+// wins) is loaded BEFORE pf is enabled, and pf is never enabled after a failed
+// load.
 // pf.conf is the proof that the ruleset in force is ours, so with nothing
 // wanted pf is untouched unless that file exists.
 //
 // A VAP that was destroyed loses its queue or its block, and pf does not say
 // so: VAP.pfq marks "the ruleset was loaded with this VAP in it" and the apply
 // script removes it when it stops or starts a VAP (as it does VAP.acl). A
-// running capped or isolated VAP without a marker makes the ruleset load
+// running VAP named in the ruleset (capped, isolated or tagged) without a
+// marker makes the ruleset load
 // again; parsing "pfctl -sq" instead would depend on a format never seen on
 // this unit.
 //
@@ -184,7 +202,13 @@ lim() {
 m=0
 wi=
 wb=
-# blk VAP BRIDGE: the VAP is isolated; a block line is written after "pass all"
+ws=
+# sta VAP: a running VAP of the daemon, whose frames are tagged as a client's
+# (used only when a VAP is isolated)
+sta() {
+	case "$(ifconfig $1 2>&1)" in *RUNNING*"status: running"*) ws="$ws $1";; esac
+}
+# blk VAP BRIDGE: the VAP is isolated; its block rules come after "pass all"
 blk() {
 	case "$(ifconfig $1 2>&1)" in *RUNNING*"status: running"*) ;; *) return;; esac
 	m=$((m + 1))
@@ -237,11 +261,22 @@ const apPFTail = `if [ $n -eq 0 ] && [ $m -eq 0 ]; then
 	exit 0
 fi
 echo "pass all" >> $T
-for v in $wi; do echo "block out on $v all" >> $T; done
+if [ $m -gt 0 ]; then
+	echo "pass in all tag UOWUP" >> $T
+	for v in $ws; do echo "pass in on $v all tag UOWSTA" >> $T; done
+	for v in $wi; do
+		echo "block out on $v all" >> $T
+		echo "pass out on $v tagged UOWUP" >> $T
+		echo "pass out on $v inet proto udp from any port 67 to any port 68" >> $T
+		echo "pass out on $v inet6 proto icmp6 all icmp6-type { routeradv, neighbrsol, neighbradv }" >> $T
+	done
+else
+	ws=
+fi
 need=
 [ "$(cat $T)" = "$(cat $F 2>/dev/null)" ] || need=1
 case "$(pfctl -s info 2>&1)" in *"Status: Enabled"*) ;; *) need=1;; esac
-for v in $w $wi; do [ -e $D/$v.pfq ] || need=1; done
+for v in $w $wi $ws; do [ -e $D/$v.pfq ] || need=1; done
 if [ -z "$need" ]; then
 	rm -f $T
 	brsync
@@ -254,7 +289,7 @@ if ! r=$(pfctl -f $T 2>&1); then
 fi
 mv $T $F
 rm -f $D/wlan1?.pfq $D/wlan2?.pfq
-for v in $w $wi; do : > $D/$v.pfq; done
+for v in $w $wi $ws; do : > $D/$v.pfq; done
 if ! r=$(pfctl -e 2>&1); then
 	case "$r" in
 	*"already enabled"*) ;;
@@ -272,14 +307,27 @@ exit 0
 // AirPortLimitsScript is the script for the download caps alone (see
 // AirPortPFScript).
 func AirPortLimitsScript(lims []PFLimit) (string, error) {
-	return AirPortPFScript(lims, nil)
+	return AirPortPFScript(lims, nil, nil)
+}
+
+// AirPortVAPNames is the name of every VAP of the last apply, in order: the
+// VAPs whose frames pf tags as a client's when a VAP is isolated.
+func AirPortVAPNames(vaps []AirPortVAP) []string {
+	var out []string
+	for _, v := range vaps {
+		out = append(out, v.Name)
+	}
+	return out
 }
 
 // AirPortPFScript is the script that makes pf cap these VAPs and isolate those
 // (see apPFHead). It prints one line per change and nothing when pf is already
 // as wanted. Only the daemon's own VAP and bridge names and positive whole
 // rates reach the shell.
-func AirPortPFScript(lims []PFLimit, iso []PFIso) (string, error) {
+//
+// all is every VAP of the daemon (AirPortVAPNames); the script keeps the ones
+// that run, and the isolated ones are in it whether or not the caller listed them.
+func AirPortPFScript(lims []PFLimit, iso []PFIso, all []string) (string, error) {
 	var b strings.Builder
 	b.WriteString(apPFHead)
 	seen := map[string]bool{}
@@ -308,19 +356,40 @@ func AirPortPFScript(lims []PFLimit, iso []PFIso) (string, error) {
 		seenIso[x.VAP] = true
 		fmt.Fprintf(&b, "blk %s %s\n", x.VAP, x.Bridge)
 	}
+	if len(iso) > 0 {
+		seenSta := map[string]bool{}
+		names := append(append([]string{}, all...), isoNames(iso)...)
+		for _, n := range names {
+			if !apVAPName.MatchString(n) {
+				return "", fmt.Errorf("refusing VAP name %q", n)
+			}
+			if !seenSta[n] {
+				seenSta[n] = true
+				fmt.Fprintf(&b, "sta %s\n", n)
+			}
+		}
+	}
 	b.WriteString(apPFTail)
 	return b.String(), nil
 }
 
-// SyncAirPortPF makes pf cap what lims say and isolate what iso says. It is
-// idempotent and cheap (no pfctl call at all when nothing is wanted and we never
-// loaded a ruleset), so call it after every apply and now and then. It returns
-// one line per change.
-func (cl *Client) SyncAirPortPF(lims []PFLimit, iso []PFIso) ([]string, error) {
+func isoNames(iso []PFIso) []string {
+	var out []string
+	for _, x := range iso {
+		out = append(out, x.VAP)
+	}
+	return out
+}
+
+// SyncAirPortPF makes pf cap what lims say and isolate what iso says; all is
+// every VAP of the last apply. It is idempotent and cheap (no pfctl call at all
+// when nothing is wanted and we never loaded a ruleset), so call it after every
+// apply and now and then. It returns one line per change.
+func (cl *Client) SyncAirPortPF(lims []PFLimit, iso []PFIso, all []string) ([]string, error) {
 	if !cl.IsAirPort() {
 		return nil, errors.New("not an AirPort base station")
 	}
-	s, err := AirPortPFScript(lims, iso)
+	s, err := AirPortPFScript(lims, iso, all)
 	if err != nil {
 		return nil, err
 	}
