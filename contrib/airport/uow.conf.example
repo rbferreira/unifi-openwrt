@@ -1,3 +1,4 @@
+# sourced by up.sh: the controller's inform URL, the UniFi model to adopt as, the name shown
 URL=http://192.0.2.1:8080/inform
 MODEL=U7PG2
 NAME=AirPort
