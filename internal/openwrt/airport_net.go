@@ -16,8 +16,9 @@ import (
 // WLAN on VLAN N is a VAP in bridgeN together with vlanN, an 802.1Q interface on
 // the mesh uplink (measured, gaps.md #13: the Pi got an address on the VLAN from
 // the gateway). The unit has no per-VAP VLAN tag, so the uplink is the only way
-// out; with a wired uplink the tagging interface is not known, and a VLAN WLAN
-// stays off.
+// out. With a wired uplink (a cable on the WAN jack, no mesh) the tagging
+// interface is the switch's, bcmeth0 (measured: vlan77 on bcmeth0 reached the
+// gateway's address on that VLAN).
 //
 // The daemon creates only vlanN and bridgeN (N = 2..4094), keeps their names in
 // apRunDir/nets, and destroys only what is listed there. The uplink interface is
@@ -29,18 +30,21 @@ const (
 	apMaxVLAN = 4094
 )
 
-// apUpIfRE is what the uplink's interface may look like: a net80211 wlanN, and not
-// one of the daemon's own (wlan10..17, wlan20..27).
+// apUpIfRE is what a wireless uplink's interface may look like: a net80211 wlanN,
+// and not one of the daemon's own (wlan10..17, wlan20..27). apWiredIf is the
+// interface of the unit's switch, the uplink when the cable is on the WAN jack.
 var apUpIfRE = regexp.MustCompile(`^wlan[0-9]{1,3}$`)
 
+const apWiredIf = "bcmeth0"
+
 func apUpIfOK(name string) bool {
-	return apUpIfRE.MatchString(name) && !apVAPName.MatchString(name)
+	return name == apWiredIf || (apUpIfRE.MatchString(name) && !apVAPName.MatchString(name))
 }
 
 // APNet is what the network of a WLAN depends on, besides the WLAN itself.
 type APNet struct {
-	// UpIf is the mesh uplink's interface ("" = no wireless uplink: wired, or
-	// none yet), the parent of every vlanN.
+	// UpIf is the uplink's interface, the parent of every vlanN: the mesh
+	// uplink's, or the switch's with a cable on the WAN jack ("" = none yet).
 	UpIf string
 	// Portal: the controller's guest portal is on (redirector), so a guest WLAN
 	// expects the AP to hold back unauthorised guests.
@@ -58,8 +62,11 @@ func (v AirPortVAP) Bridge() string {
 	return "bridge0"
 }
 
-// UplinkIface is the interface of the mesh uplink (the client VAP), "" when the
-// unit has none or the name is not one this code would pass to a shell.
+// UplinkIface is the interface the unit reaches the network by: the mesh uplink
+// (the client VAP) when there is one, else the switch when the WAN jack has link.
+// "" when it has neither, or the name is not one this code would pass to a shell.
+// While the mesh uplink is there it is the uplink, cable or not: the unit's boot
+// script only gives it up for a cable that reaches the gateway.
 func (s *Snapshot) UplinkIface() string {
 	for _, r := range s.Radios {
 		for _, v := range r.VAPs {
@@ -67,6 +74,9 @@ func (s *Snapshot) UplinkIface() string {
 				return v.Iface
 			}
 		}
+	}
+	if len(s.Ports) > 0 && s.Ports[0].Name == "wan" && s.Ports[0].Up {
+		return apWiredIf
 	}
 	return ""
 }
@@ -96,7 +106,7 @@ func apNetFor(l translate.WantedWLAN, n APNet) (vlan int, isolate bool, skip str
 	case l.VLAN < apMinVLAN || l.VLAN > apMaxVLAN:
 		return 0, false, fmt.Sprintf("VLAN %d is not a usable id (%d to %d)", l.VLAN, apMinVLAN, apMaxVLAN)
 	case n.UpIf == "":
-		return 0, false, fmt.Sprintf("VLAN %d needs the mesh uplink to tag on, and this unit has none (the tagging interface of a wired uplink is not known yet)", l.VLAN)
+		return 0, false, fmt.Sprintf("VLAN %d needs an uplink to tag on, and this unit has none yet (no mesh uplink, no link on the WAN jack)", l.VLAN)
 	case !apUpIfOK(n.UpIf):
 		return 0, false, fmt.Sprintf("VLAN %d: uplink interface %q is not usable", l.VLAN, n.UpIf)
 	}

@@ -281,7 +281,7 @@ configuration file. Four states, and the third column says what was and was not 
 | WPA3, WPA2/WPA3, PMF, 802.11r, 802.11v | not possible | The Broadcom driver does authentication and association itself, so hostapd only sees events and has no management-frame path, which SAE, FT and BSS transition need. `wl` answers "Operation not supported" to `mfp`, `mfp_config`, `mfp_sha256`, `fbt`, `wnm` and `sae_password`, `wpa_auth` knows only WPA and WPA2 PSK, and `wl cap` lists none of them. The firmware's hostapd (0.6.5) rejects the keys; a hostapd 2.11 cross-built for the unit would add nothing. These WLANs are left off, never downgraded, and a required PMF is logged |
 | WPA-Enterprise | not done | The WLAN is left off with a note |
 | WLAN on a VLAN, behind the mesh uplink | works | A WLAN of the console on VLAN 77 came up on both radios: the daemon creates `vlan77` on the uplink VAP (802.1Q) and `bridge77`, and puts the WLAN's VAP in that bridge. A client got an address from the VLAN's gateway, the console listed it on that network, and a download ran at 27 Mbit/s; the uplink and the other WLANs were not disturbed. The VLAN interfaces are checked once a minute, because `up.sh` destroys them when it recreates the uplink and the daemon builds them again. Ids 2 to 4094 |
-| WLAN on a VLAN, wired uplink | not done | Left off with a note. The unit has no per-VAP VLAN tag, so the tagging has to be an interface on the uplink, and which one that is on the WAN port was not measured |
+| WLAN on a VLAN, wired uplink | works | `vlanN` on `bcmeth0`, the switch's interface, when the WAN port has link and there is no mesh uplink. Seen with a cable to a switch: a client got its address on the VLAN from the gateway, reached the internet, and the WLAN's 2 Mbit/s download cap held (1.86 measured). Going from one uplink to the other makes the daemon plan the VLANs again. |
 | Guest WLAN, with the site's captive portal | not possible | Left off with a note (seen). The portal has to hold back unauthorised guests, which means matching the guest's MAC address, and `pf` here matches addresses and ports only. An authorisation by IP on the way out to the uplink would be needed: not built |
 | Guest WLAN, no portal | works | On a VLAN or on the LAN, always isolated. The controller's guest ranges are enforced by `pf` where the frame comes in from the VAP: DHCP and the pre-allowed ranges pass, the restricted ones (by default the private blocks and multicast) and all IPv6 are blocked. Seen on a VLAN with the default ranges: a fresh lease, the gateway and a LAN address unreachable, the internet reachable, the download cap still exact. Not exercised: on the native LAN, with pre-allowed ranges, and set from the console (the test site keeps its portal on) |
 | **Channel and radio** | | |
@@ -492,7 +492,7 @@ channel; an open WLAN and a hidden one through the console; any other AirPort mo
 parent that is not a UniFi AP.
 
 Not done, as the table says: a per-client download limit (not possible with `pf`) and an upload
-limit; WLANs on a VLAN and guest networks with a wired uplink; a captive portal; serving
+limit; guest networks with a wired uplink (built with the VLAN path, not tried); a captive portal; serving
 device logins; SNMP; NTP
 and the time zone; 802.11k neighbour lists.
 

@@ -43,12 +43,13 @@ func TestAPNetFor(t *testing.T) {
 		{"VLAN 1", vlan(1), APNet{UpIf: "wlan9"}, 0, false, "VLAN 1 is not a usable id"},
 		{"VLAN 4095", vlan(4095), APNet{UpIf: "wlan9"}, 0, false, "VLAN 4095 is not a usable id"},
 		{"VLAN -5", vlan(-5), APNet{UpIf: "wlan9"}, 0, false, "not a usable id"},
-		{"VLAN without a wireless uplink", vlan(77), APNet{}, 0, false, "needs the mesh uplink"},
+		{"VLAN without an uplink", vlan(77), APNet{}, 0, false, "needs an uplink"},
+		{"VLAN on a wired uplink", vlan(77), APNet{UpIf: "bcmeth0"}, 77, false, ""},
 		{"uplink named like a daemon VAP", vlan(77), APNet{UpIf: "wlan10"}, 0, false, "not usable"},
 		{"uplink that is no interface", vlan(77), APNet{UpIf: "wlan9; reboot"}, 0, false, "not usable"},
 		{"uplink that is not a wlan", vlan(77), APNet{UpIf: "bridge0"}, 0, false, "not usable"},
 		{"guest on a VLAN", guest(77), APNet{UpIf: "wlan9"}, 77, true, ""},
-		{"guest on a VLAN, wired", guest(77), APNet{}, 0, false, "needs the mesh uplink"},
+		{"guest on a VLAN, no uplink", guest(77), APNet{}, 0, false, "needs an uplink"},
 		{"guest on a VLAN, invalid id", guest(1), APNet{UpIf: "wlan9"}, 0, false, "not a usable id"},
 		{"guest on a VLAN with the portal", guest(77), APNet{UpIf: "wlan9", Portal: true}, 0, false, "captive portal"},
 		{"guest on the LAN, no ranges", guest(0), APNet{UpIf: "wlan9"}, 0, false, "no restricted range that covers private space"},
@@ -140,7 +141,7 @@ func TestAirPortVAPsNet(t *testing.T) {
 		if !reflect.DeepEqual(apNames(vaps), []string{"wlan10"}) { // the skipped WLAN takes no slot
 			t.Fatalf("names %v", apNames(vaps))
 		}
-		if len(notes) != 2 || !apNotesHave(notes, "wireless.1") || !apNotesHave(notes, "VLAN 77") || !apNotesHave(notes, "no VAP") || !apNotesHave(notes, "wired uplink") {
+		if len(notes) != 2 || !apNotesHave(notes, "wireless.1") || !apNotesHave(notes, "VLAN 77") || !apNotesHave(notes, "no VAP") || !apNotesHave(notes, "WAN jack") {
 			t.Errorf("notes %q", notes)
 		}
 	})
@@ -342,7 +343,7 @@ bridge.2.port.3.devname=eth0.77
 	if len(p.VAPs) != 1 || !apNotesHave(p.Notes, "captive portal") {
 		t.Fatalf("portal plan: %+v notes %q", p.VAPs, p.Notes)
 	}
-	// a wired unit: the VLAN WLAN is off, and says why
+	// a unit with no uplink at all: the VLAN WLAN is off, and says why
 	wired := *snap
 	wired.Radios = append([]Radio(nil), snap.Radios...)
 	for i := range wired.Radios {
@@ -355,8 +356,19 @@ bridge.2.port.3.devname=eth0.77
 		wired.Radios[i].VAPs = keep
 	}
 	p = PlanAirPort(translate.ParseCfg(base), &wired, now, nil, nil)
-	if p.UpIf != "" || len(p.VAPs) != 1 || !apNotesHave(p.Notes, "needs the mesh uplink") {
+	if p.UpIf != "" || len(p.VAPs) != 1 || !apNotesHave(p.Notes, "needs an uplink") {
+		t.Fatalf("plan with no uplink: upif %q vaps %+v notes %q", p.UpIf, p.VAPs, p.Notes)
+	}
+	// a cable on the WAN jack: the VLAN is tagged on the switch's interface
+	wired.Ports = []Port{{Name: "wan", Up: true}, {Name: "lan1"}}
+	p = PlanAirPort(translate.ParseCfg(base), &wired, now, nil, nil)
+	if p.UpIf != "bcmeth0" || len(p.VAPs) != 2 || p.VAPs[1].VLAN != 77 || p.VAPs[1].UpIf != "bcmeth0" {
 		t.Fatalf("wired plan: upif %q vaps %+v notes %q", p.UpIf, p.VAPs, p.Notes)
+	}
+	// link on a LAN jack only is not an uplink
+	wired.Ports = []Port{{Name: "wan"}, {Name: "lan1", Up: true}}
+	if u := wired.UplinkIface(); u != "" {
+		t.Fatalf("LAN jack link taken for an uplink: %q", u)
 	}
 }
 
