@@ -154,7 +154,7 @@ func AirPortNbrSets(s *Snapshot, results []ScanResult) []AirPortNbrSet {
 			if v.Mode != "Master" || v.SSID == "" || !apVAPName.MatchString(v.Iface) {
 				continue
 			}
-			out = append(out, AirPortNbrSet{VAP: v.Iface, SSID: v.SSID, Nbrs: AirPortNeighbors(results, v.SSID, own, s.ARP)})
+			out = append(out, AirPortNbrSet{VAP: v.Iface, SSID: v.SSID, Nbrs: AirPortNeighbors(results, v.SSID, own, apKnownMACs(s))})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].VAP < out[j].VAP })
@@ -264,4 +264,21 @@ func (cl *Client) SyncAirPortNeighbors(sets []AirPortNbrSet) ([]string, error) {
 		return lines, fmt.Errorf("airport neighbours: %w", err)
 	}
 	return lines, nil
+}
+
+// apKnownMACs is every MAC the unit knows on its LAN: its ARP table, which
+// only has the few hosts it talks to, plus the bridge's forwarding table,
+// where the other APs of the site show up (measured: with the ARP table alone
+// no BSS of the same network was ever recognised as a sibling).
+func apKnownMACs(s *Snapshot) map[string]string {
+	m := map[string]string{}
+	for mac, ip := range s.ARP {
+		m[mac] = ip
+	}
+	for _, e := range s.FDB {
+		if _, ok := m[e.MAC]; !ok && !e.Local {
+			m[e.MAC] = ""
+		}
+	}
+	return m
 }
