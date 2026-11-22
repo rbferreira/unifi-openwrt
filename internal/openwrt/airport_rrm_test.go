@@ -17,7 +17,7 @@ import (
 // octets with every sibling BSSID below (parentDevice's match).
 const apNbrSSID = "HomeNet"
 
-var apNbrARP = map[string]string{"02:00:11:22:33:00": "172.16.0.50"}
+var apNbrARP = map[string]string{"02:00:11:22:33:00": "192.0.2.50"}
 
 func apNbrBSS(last string, ssid string, ch, sig int) BSS {
 	freq := 2407 + 5*ch
