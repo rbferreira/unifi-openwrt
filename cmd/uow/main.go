@@ -808,7 +808,15 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 		log.Printf("plan: reading the AP: %v", err)
 		return
 	}
-	w := translate.Wifi(translate.ParseCfg(string(cfg)), snap.RadioNames())
+	parsed := translate.ParseCfg(string(cfg))
+	// An empty or cut-short file is not "no WLANs": applying it would take
+	// every WLAN off the air (it happened, with a config truncated by a full
+	// disk). The controller's config always has its radio sections.
+	if parsed["radio.1.phyname"] == "" {
+		log.Printf("plan: %s has no radio section (empty or truncated?): nothing applied", cfgPath)
+		return
+	}
+	w := translate.Wifi(parsed, snap.RadioNames())
 	uplink5 := snap.UplinkChannel("na")
 	vaps, notes := openwrt.AirPortVAPs(w, uplink5)
 	notes = append(notes, openwrt.AirPortCountryNotes(w, snap.Country)...)
