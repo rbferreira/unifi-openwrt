@@ -13,6 +13,43 @@ If you like this or find it useful, support the project by buying me a coffee.
 
 <a href="https://www.buymeacoffee.com/antoniocosta" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 40px !important;width: 140px !important;" ></a>
 
+## This fork: an Apple AirPort as a UniFi access point
+
+This is a fork of [antoniocosta/unifi-openwrt](https://github.com/antoniocosta/unifi-openwrt).
+Everything below this section is the upstream project, unchanged. The fork adds one thing: a
+backend for an **Apple AirPort Time Capsule A1470** (802.11ac, firmware 7.9.1), which does not
+run OpenWrt. The daemon runs on the base station itself (`-ap local -ap-platform airport`), the
+unit joins the network as a wireless mesh child of a UniFi AP, and the UniFi console adopts and
+configures it like one of its own.
+
+The kit, the build and the step-by-step are in [contrib/airport](contrib/airport/README.md),
+with what was measured on the unit for each item below.
+
+**What it does, from the UniFi console**
+
+| | |
+|---|---|
+| WLANs | open and WPA2 personal, up to 8 per band, hidden SSID, enable and disable, schedules |
+| Radios | channel on both bands (automatic channel chosen from a neighbour scan), transmit power, 20/40/80 MHz on 5 GHz when the uplink is not wireless, DTIM, client limit |
+| Networks | WLANs on a VLAN (over the mesh uplink), guest WLANs without the captive portal with the console's restricted ranges |
+| Clients | block and unblock, reconnect, minimum RSSI, MAC filter (allow and deny lists, clients locked to another AP), client isolation, download limit per WLAN |
+| Reported | radios, WLANs, clients with signal, rates and counters, the wireless uplink and its parent, all ports, neighbouring networks, 802.11k neighbour lists, firmware and country |
+| Device | adoption, restart, locate (the LED alternates its two colours), remote syslog, mesh uplink credentials kept in step with the console, the WLANs back at boot before the console is reached |
+
+**What it does not do**
+
+| | |
+|---|---|
+| The radio driver cannot | WPA3 and WPA2/WPA3, protected management frames, 802.11r, 802.11v, channel utilization, 40 MHz on 2.4 GHz |
+| Not possible on this unit | captive portal and guest authorisation, per-client and upload rate limits, serving mesh children, LED off, temperatures in the console |
+| Follows the mesh uplink | the 5 GHz channel and width while the uplink is wireless |
+| Not done yet | VLANs and guests with a wired uplink, device logins, SNMP, NTP and time zone from the console |
+| Written, not tested yet | the wired uplink as a whole (a cable on the WAN port), band steering (prefer 5 GHz), guest WLANs on the native LAN |
+
+Other AirPort models are not covered. The backend needs a Go toolchain patched for the unit's
+NetBSD 6 kernel ([contrib/airport/go](contrib/airport/go/README.md)); the OpenWrt side builds
+as upstream describes.
+
 ## Why this repo exists
 
 I own a Google OnHub (TP-Link TGR1900). It is still a capable 3x3 Wi-Fi 5 access point, but Google
