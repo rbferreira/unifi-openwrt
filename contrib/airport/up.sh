@@ -95,6 +95,10 @@ vlans_stop() {
 		case "$(ifconfig $v 2>&1)" in *"parent interface: $IF"*) ifconfig $v destroy 2>/dev/null;; esac
 	done
 }
+# A wrong key still leaves the VAP "associated" (measured): the access point accepts the
+# association and it is the 4-way handshake that fails, over and over. The supplicant says so
+# in its log, which each join starts afresh.
+keybad() { case "$(cat $M/wpa.log 2>/dev/null)" in *"4-Way Handshake failed"*) return 0;; esac; return 1; }
 alive() { p=$(cat $M/wpa.pid 2>/dev/null); [ -n "$p" ] && kill -0 $p 2>/dev/null; }
 leave() {
 	vaps5_stop
@@ -149,14 +153,15 @@ join() {
 	kill -CONT $A
 	n=0
 	until assoc; do n=$((n + 1)); [ $n -gt 45 ] && break; sleep 2; done
-	assoc && sleep 3   # the WPA handshake ends after "associated"; a wrong key is dropped in it
-	if assoc; then
+	assoc && sleep 6   # the WPA handshake ends after "associated"
+	if assoc && ! keybad; then
 		wl=$wf; wnext=; [ $wf = $WC ] && wfail=0
 		brconfig $BR add $IF up && say "uplink associated and in $BR" || say "brconfig failed"
 		led 2
 		upc=$(upch)
 	else
-		say "uplink did not associate in 90 s with $wf"; led 1
+		keybad && say "uplink: wrong key in $wf" || say "uplink did not associate in 90 s with $wf"
+		led 1
 		wfailed
 	fi
 }
@@ -177,14 +182,14 @@ while :; do
 		lost=$((lost + 5))
 		if [ $meshing = 0 ] && [ $lost -ge 20 ]; then wquick=; join; meshing=1; bad=0; [ -n "$wquick" ] && bad=60; fi
 		if [ $meshing = 1 ]; then
-			if alive && assoc; then
+			if alive && assoc && ! keybad; then
 				bad=0
 				# the parent changed channel: the 5 GHz WLANs start again on it
 				c=$(upch); [ -n "$upc" ] && [ -n "$c" ] && [ "$c" != "$upc" ] && { say "uplink moved to channel $c"; vaps5_stop; upc=$c; }
 			else
 				bad=$((bad + 5))
 			fi
-			if [ $bad -ge 60 ]; then leave "not associated for 60 s"; meshing=0; lost=20; bad=0; led 1; fi
+			if [ $bad -ge 60 ]; then keybad && { say "uplink: wrong key in $wf"; wfailed; }; leave "not associated for 60 s"; meshing=0; lost=20; bad=0; led 1; fi
 		fi
 	fi
 	[ $HAVE_UOW = 1 ] && uow_keep
