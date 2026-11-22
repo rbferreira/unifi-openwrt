@@ -136,6 +136,11 @@ func (s *Snapshot) Fields(prev *Snapshot, info CfgInfo, caps map[string]RadioCap
 			if s.PortsOrdered { // the WAN jack comes first whether or not it is the uplink
 				u := s.uplinkPort()
 				uplink = u != nil && p.Up && u.Name == p.Name
+				// with a wireless uplink no jack is the uplink: a LAN port with
+				// link is a wired client's (seen: it was shown as the uplink)
+				if s.UplinkChannel("na") > 0 || s.UplinkChannel("ng") > 0 {
+					uplink = false
+				}
 			}
 			row := map[string]any{
 				"port_idx": idx, "name": name, "media": "GE", "ifname": p.Name,

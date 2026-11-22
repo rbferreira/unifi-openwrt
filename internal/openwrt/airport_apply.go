@@ -67,6 +67,9 @@ type AirPortVAP struct {
 	// with the mesh uplink too (measured: it lowers the uplink's power with it
 	// and the uplink stays associated).
 	TxPower int
+	// Devname is the controller's name for this VAP (wireless.N.devname): the key
+	// of its qos.vap.N rate limit (airport_limit.go).
+	Devname string
 }
 
 // Config is the whole hostapd config, with the unit's regulatory ids.
@@ -306,7 +309,7 @@ func airPortVAP(suffix, parent string, r translate.WantedRadio, l translate.Want
 		w("channel", fmt.Sprint(ch))
 	}
 	return AirPortVAP{Name: name, Parent: parent, SSID: l.SSID, Security: l.Security, Channel: ch, ChannelOf: follow, Tune: tune, Spec: spec, Head: h.String(), Tail: t.String(),
-		Isolate: l.Isolate, TxPower: tx}
+		Isolate: l.Isolate, TxPower: tx, Devname: l.Devname}
 }
 
 // UplinkChannel is the channel of the mesh uplink (the client VAP) on the radio
@@ -422,7 +425,7 @@ stop() {
 		while alive $1 && [ $n -lt 5 ]; do sleep 1; n=$((n + 1)); done
 		alive $1 && kill -9 $(cat $D/$1.pid) 2>/dev/null
 	fi
-	rm -f $D/$1.pid $D/$1.acl # a VAP made again starts with an empty driver ACL
+	rm -f $D/$1.pid $D/$1.acl $D/$1.pfq # a VAP made again starts with an empty driver ACL and no altq
 	brconfig bridge0 delete $1 >/dev/null 2>&1
 	ifconfig $1 destroy >/dev/null 2>&1
 }
@@ -444,7 +447,7 @@ ok() {
 # (the config has the channel of the mesh uplink, which alone tunes the radio).
 start() {
 	v=$1
-	rm -f $D/$v.acl
+	rm -f $D/$v.acl $D/$v.pfq
 	ifconfig $v create wlandev $2 wlanmode hostap >/dev/null 2>&1 || { echo "$v failed: ifconfig create"; rm -f $D/$v.new; return; }
 	case $3 in auto|-) ;; *) ifconfig $v channel $3 >/dev/null 2>&1;; esac
 	mv $D/$v.new $D/$v.want

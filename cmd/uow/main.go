@@ -753,7 +753,30 @@ var (
 	airportBlocked []string
 	airportACLKey  string
 	airportACLDone bool
+	// the download caps of the last apply (pf altq), and whether the unit may
+	// have a ruleset of ours loaded (so an empty list still has to run once)
+	airportLimits  []openwrt.PFLimit
+	airportPFTouch bool
 )
+
+// syncAirPortLimits makes pf cap the VAPs of the last apply as the controller's
+// rate limits say. It runs after the Wi-Fi apply (an altq needs its interface)
+// and from airportKeep, which also notices a VAP that was made again (its
+// queue is gone: the script finds the VAP without its marker and loads again).
+// With nothing to cap and no ruleset of ours it makes no call.
+func syncAirPortLimits(ap *openwrt.Client, first bool) {
+	if !airportApply || (len(airportLimits) == 0 && !airportPFTouch && !first) {
+		return
+	}
+	airportPFTouch = len(airportLimits) > 0
+	lines, err := ap.SyncAirPortLimits(airportLimits)
+	for _, l := range lines {
+		log.Printf("  airport: %s", l)
+	}
+	if err != nil {
+		log.Printf("LIMITS FAILED: %v", err)
+	}
+}
 
 // syncAirPortACL brings the driver ACL of every VAP of the last apply to the
 // WLAN's MAC filter plus the blocked clients. Without force it does nothing
@@ -815,6 +838,7 @@ func airportKeep(ap *openwrt.Client) {
 	}
 	if why == "" {
 		syncAirPortACL(ap, true)
+		syncAirPortLimits(ap, false)
 		return
 	}
 	log.Printf("airport: %s: applying again", why)
@@ -874,9 +898,17 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 	for _, n := range airportSteerSetup(parsed, string(cfg)) {
 		log.Printf("  note: %s", n)
 	}
+	limits, notes := openwrt.AirPortLimits(translate.QoSLimits(parsed), vaps)
+	for _, n := range notes {
+		log.Printf("  note: %s", n)
+	}
 	if !apply {
+		if len(limits) > 0 {
+			log.Printf("LIMITS (log-only): %+v", limits)
+		}
 		return
 	}
+	airportLimits = limits
 	airportWanted, airportSchedKey = plan.Wanted, plan.SchedKey
 	airportVAPs, airportUplink5, airportChecked = vaps, uplink5, time.Now()
 	lines, err := ap.ApplyAirPort(vaps)
@@ -906,6 +938,7 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 		log.Printf("  not running: %v", down)
 	}
 	syncAirPortACL(ap, true) // new VAPs have an empty driver ACL
+	syncAirPortLimits(ap, true)
 }
 
 func plan(ap *openwrt.Client, cfgPath string) (translate.Result, error) {
