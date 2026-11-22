@@ -18,6 +18,8 @@ import (
 // The network of a WLAN (airport_net.go): the planner, the script text, and the
 // script run against the stub device of airport_apply_test.go. Placeholder data.
 
+var guestDefault = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4"}
+
 func TestAPNetFor(t *testing.T) {
 	vlan := func(id int) func(*translate.WantedWLAN) {
 		return func(l *translate.WantedWLAN) { l.VLAN = id }
@@ -49,9 +51,19 @@ func TestAPNetFor(t *testing.T) {
 		{"guest on a VLAN, wired", guest(77), APNet{}, 0, false, "needs the mesh uplink"},
 		{"guest on a VLAN, invalid id", guest(1), APNet{UpIf: "wlan9"}, 0, false, "not a usable id"},
 		{"guest on a VLAN with the portal", guest(77), APNet{UpIf: "wlan9", Portal: true}, 0, false, "captive portal"},
-		{"guest on the LAN", guest(0), APNet{UpIf: "wlan9"}, 0, false, "guest network on the LAN"},
-		{"guest on the LAN, wired", guest(0), APNet{}, 0, false, "guest network on the LAN"},
-		{"guest on the LAN with the portal", guest(0), APNet{UpIf: "wlan9", Portal: true}, 0, false, "captive portal"},
+		{"guest on the LAN, no ranges", guest(0), APNet{UpIf: "wlan9"}, 0, false, "no restricted range that covers private space"},
+		{"guest on the LAN, no ranges, wired", guest(0), APNet{}, 0, false, "guest network on the LAN"},
+		{"guest on the LAN, the default ranges", guest(0), APNet{UpIf: "wlan9", Restricted: guestDefault}, 0, true, ""},
+		{"guest on the LAN, wired uplink: no VLAN needed", guest(0), APNet{Restricted: guestDefault}, 0, true, ""},
+		{"guest on the LAN, 192.168/16 only", guest(0), APNet{Restricted: []string{"192.168.0.0/16"}}, 0, true, ""},
+		{"guest on the LAN, a bigger range holds a block", guest(0), APNet{Restricted: []string{"10.0.0.0/7"}}, 0, true, ""},
+		{"guest on the LAN, a range inside a block is not enough", guest(0), APNet{Restricted: []string{"192.168.1.0/24"}}, 0, false, "no restricted range that covers private space"},
+		{"guest on the LAN, public ranges only", guest(0), APNet{Restricted: []string{"192.0.2.0/24", "224.0.0.0/4"}}, 0, false, "no restricted range that covers private space"},
+		{"guest on the LAN, IPv6 range only", guest(0), APNet{Restricted: []string{"fc00::/7"}}, 0, false, "no restricted range that covers private space"},
+		{"guest on the LAN, an invalid range", guest(0), APNet{Restricted: []string{"10.0.0.0/8", "10.0.0.1"}}, 0, false, "not a CIDR prefix"},
+		{"guest on a VLAN, an invalid pre-allowed range", guest(77), APNet{UpIf: "wlan9", PreAllow: []string{"x/8"}}, 0, false, "pre-allowed"},
+		{"guest on a VLAN, ranges that do not cover private space", guest(77), APNet{UpIf: "wlan9", Restricted: []string{"192.0.2.0/24"}}, 77, true, ""},
+		{"guest on the LAN with the portal", guest(0), APNet{UpIf: "wlan9", Portal: true, Restricted: guestDefault}, 0, false, "captive portal"},
 		// the portal is only about guests
 		{"VLAN with the portal on", vlan(77), APNet{UpIf: "wlan9", Portal: true}, 77, false, ""},
 		{"LAN with the portal on", func(*translate.WantedWLAN) {}, APNet{Portal: true}, 0, false, ""},
@@ -146,7 +158,7 @@ func TestAirPortVAPsNet(t *testing.T) {
 	t.Run("guest variants", func(t *testing.T) {
 		w := translate.Wanted{Radios: apRadios(), WLANs: []translate.WantedWLAN{
 			mk("1", "wifi0", guest(30)), mk("2", "wifi1", guest(30)), // runs, isolated, shares bridge30
-			mk("3", "wifi0", guest(0)),  // on the LAN: off
+			mk("3", "wifi0", guest(0)),  // on the LAN, no ranges to hold guests off the LAN: off
 			mk("4", "wifi0", nil),       // the LAN WLAN, takes the second slot
 			mk("5", "wifi1", guest(31)), // runs
 		}}
@@ -165,18 +177,37 @@ func TestAirPortVAPsNet(t *testing.T) {
 		if !apNotesHave(notes, "wireless.3") || !apNotesHave(notes, "guest network on the LAN") {
 			t.Errorf("notes %q", notes)
 		}
-		// the VLAN guest note comes once, with the count
+		// the guest note comes once, with the count
 		n := 0
 		for _, x := range notes {
-			if strings.Contains(x, "guest WLAN(s) on a VLAN") {
+			if strings.Contains(x, "guest WLAN(s): client isolation is forced on") {
 				n++
-				if !strings.Contains(x, "3 guest") || !strings.Contains(x, "gateway") {
+				if !strings.Contains(x, "3 guest") || !strings.Contains(x, "pf") {
 					t.Errorf("note %q", x)
 				}
 			}
 		}
 		if n != 1 {
 			t.Errorf("%d guest notes: %q", n, notes)
+		}
+	})
+
+	t.Run("guest on the LAN with the default ranges runs, isolated, Guest set", func(t *testing.T) {
+		w := translate.Wanted{Radios: apRadios(), WLANs: []translate.WantedWLAN{
+			mk("1", "wifi0", guest(0)), mk("2", "wifi1", guest(0)), mk("3", "wifi0", nil),
+		}}
+		vaps, notes := AirPortVAPsNet(w, 40, APNet{UpIf: "wlan9", Restricted: guestDefault})
+		if !reflect.DeepEqual(apNames(vaps), []string{"wlan10", "wlan20", "wlan11"}) {
+			t.Fatalf("names %v notes %q", apNames(vaps), notes)
+		}
+		for i, want := range []struct{ guest, iso bool }{{true, true}, {true, true}, {false, false}} {
+			v := vaps[i]
+			if v.Guest != want.guest || v.Isolate != want.iso || v.VLAN != 0 || v.Bridge() != "bridge0" {
+				t.Errorf("%s: guest %v isolate %v bridge %s", v.Name, v.Guest, v.Isolate, v.Bridge())
+			}
+		}
+		if len(notes) != 1 || !strings.Contains(notes[0], "2 guest WLAN(s)") {
+			t.Errorf("notes %q", notes)
 		}
 	})
 

@@ -45,6 +45,9 @@ type APNet struct {
 	// Portal: the controller's guest portal is on (redirector), so a guest WLAN
 	// expects the AP to hold back unauthorised guests.
 	Portal bool
+	// Restricted and PreAllow are the guest policy's ranges (translate.Guest),
+	// checked before a guest WLAN gets a VAP.
+	Restricted, PreAllow []string
 }
 
 // Bridge is the bridge the VAP belongs in.
@@ -73,19 +76,23 @@ func (s *Snapshot) UplinkIface() string {
 // it does).
 //
 // Guest WLANs: the controller's guest policy is the authorisation portal
-// (redirector) and the restricted ranges (ipset guest_restricted). Neither can
-// be done here: the unit does not call its packet filter for a VAP's incoming
-// frames (measured). So a guest WLAN runs only where the gateway can do the
-// restricting, on a VLAN of its own, with isolation forced on. On the LAN, or
-// with a portal that the AP has to enforce, it stays off.
+// (redirector) and the restricted ranges (ipset guest_restricted). The ranges
+// are pf rules on the guest VAP (airport_guest.go); the portal is not possible
+// (pf cannot match a MAC address). So a guest WLAN runs with isolation forced
+// on, on a VLAN or on the LAN, but not with the portal, and on the LAN only when
+// a restricted range covers private space (else guests would reach the LAN).
 func apNetFor(l translate.WantedWLAN, n APNet) (vlan int, isolate bool, skip string) {
+	if l.Guest {
+		if n.Portal {
+			return 0, false, "guest network with the captive portal: holding back unauthorised guests needs the AP to match a client's MAC address, and pf cannot"
+		}
+		if why := apGuestSkip(l, n); why != "" {
+			return 0, false, why
+		}
+	}
 	switch {
-	case l.Guest && n.Portal:
-		return 0, false, "guest network with the captive portal: holding back unauthorised guests is the AP's job and this platform cannot filter a VAP's incoming frames"
-	case l.Guest && l.VLAN == 0:
-		return 0, false, "guest network on the LAN (no VLAN): this platform cannot filter a VAP's incoming frames, so guests would reach the whole LAN"
 	case l.VLAN == 0:
-		return 0, false, ""
+		return 0, l.Guest, ""
 	case l.VLAN < apMinVLAN || l.VLAN > apMaxVLAN:
 		return 0, false, fmt.Sprintf("VLAN %d is not a usable id (%d to %d)", l.VLAN, apMinVLAN, apMaxVLAN)
 	case n.UpIf == "":

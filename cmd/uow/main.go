@@ -759,6 +759,7 @@ var (
 	// and the isolated VAPs of the last apply (pf block, same ruleset)
 	airportLimits  []openwrt.PFLimit
 	airportIso     []openwrt.PFIso
+	airportGuest   openwrt.PFGuest // the guest VAPs' policy (same ruleset)
 	airportPFTouch bool
 )
 
@@ -772,7 +773,7 @@ func syncAirPortPF(ap *openwrt.Client, first bool) {
 		return
 	}
 	airportPFTouch = len(airportLimits) > 0 || len(airportIso) > 0
-	lines, err := ap.SyncAirPortPF(airportLimits, airportIso, openwrt.AirPortVAPNames(airportVAPs))
+	lines, err := ap.SyncAirPortPF(airportLimits, airportIso, openwrt.AirPortVAPNames(airportVAPs), airportGuest)
 	for _, l := range lines {
 		log.Printf("  airport: %s", l)
 	}
@@ -934,6 +935,15 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 	for _, n := range isoNotes {
 		log.Printf("  note: %s", n)
 	}
+	guest, guestNotes, err := openwrt.AirPortGuest(vaps, translate.GuestPolicy(parsed))
+	if err != nil {
+		// the planner already left such a WLAN off: this is a bug, not a policy
+		log.Printf("GUEST POLICY: %v: guest VAPs not applied", err)
+		return
+	}
+	for _, n := range guestNotes {
+		log.Printf("  note: %s", n)
+	}
 	syncAirPortUplink(ap, parsed, apply)
 	if !apply {
 		if len(limits) > 0 {
@@ -944,7 +954,7 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 		}
 		return
 	}
-	airportLimits, airportIso = limits, iso
+	airportLimits, airportIso, airportGuest = limits, iso, guest
 	airportWanted, airportSchedKey = plan.Wanted, plan.SchedKey
 	airportVAPs, airportUplink5, airportUpIf, airportChecked = vaps, uplink5, plan.UpIf, time.Now()
 	lines, err := ap.ApplyAirPort(vaps)

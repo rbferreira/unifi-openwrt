@@ -257,7 +257,13 @@ func (h *pfHost) run(lims []PFLimit) (report []string, pfctl []string) {
 // runPF is run with isolated VAPs too.
 func (h *pfHost) runPF(lims []PFLimit, iso []PFIso) (report []string, pfctl []string) {
 	h.t.Helper()
-	s, err := AirPortPFScript(lims, iso, pfAll)
+	return h.runPFG(lims, iso, PFGuest{})
+}
+
+// runPFG is runPF with the guest policy too.
+func (h *pfHost) runPFG(lims []PFLimit, iso []PFIso, g PFGuest) (report []string, pfctl []string) {
+	h.t.Helper()
+	s, err := AirPortPFScriptGuest(lims, iso, pfAll, g)
 	if err != nil {
 		h.t.Fatal(err)
 	}

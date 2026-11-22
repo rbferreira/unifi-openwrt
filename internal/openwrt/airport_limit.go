@@ -167,8 +167,8 @@ func apBridgeName(b string) bool {
 // needs its interface) and the isolated ones, then loads it only when
 // something is to change. pf is the unit's own and was off, with a stored
 // ruleset of "block drop all": our ruleset (queues, "pass all", then, when a
-// VAP is isolated, the tagging and blocking rules above: the last matching rule
-// wins) is loaded BEFORE pf is enabled, and pf is never enabled after a failed
+// VAP is isolated, the tagging and blocking rules above, then the guest rules:
+// the last matching rule wins) is loaded BEFORE pf is enabled, and pf is never enabled after a failed
 // load.
 // pf.conf is the proof that the ruleset in force is ours, so with nothing
 // wanted pf is untouched unless that file exists.
@@ -203,6 +203,9 @@ m=0
 wi=
 wb=
 ws=
+wg=
+gres=
+gpre=
 # sta VAP: a running VAP of the daemon, whose frames are tagged as a client's
 # (used only when a VAP is isolated)
 sta() {
@@ -215,6 +218,13 @@ blk() {
 	wi="$wi $1"
 	wb="$wb $2"
 }
+# gst VAP: a guest VAP that runs; gr / gp RANGE: a restricted / pre-allowed range
+# (the guest policy, airport_guest.go); the rules come after the isolation lines
+gst() {
+	case "$(ifconfig $1 2>&1)" in *RUNNING*"status: running"*) wg="$wg $1";; esac
+}
+gr() { gres="$gres $1"; }
+gp() { gpre="$gpre $1"; }
 # brsync: the packet filter is on in every bridge of $wb and, of the bridges
 # the daemon set it on (BRIDGE.ipf), only in those
 brsync() {
@@ -269,6 +279,12 @@ if [ $m -gt 0 ]; then
 		echo "pass out on $v tagged UOWUP" >> $T
 		echo "pass out on $v inet proto udp from any port 67 to any port 68" >> $T
 		echo "pass out on $v inet6 proto icmp6 all icmp6-type { routeradv, neighbrsol, neighbradv }" >> $T
+	done
+	for v in $wg; do
+		echo "pass in quick on $v inet proto udp from any port 68 to any port 67 tag UOWSTA" >> $T
+		for r in $gpre; do echo "pass in quick on $v inet from any to $r tag UOWSTA" >> $T; done
+		for r in $gres; do echo "block in quick on $v inet from any to $r" >> $T; done
+		echo "block in quick on $v inet6 all" >> $T
 	done
 else
 	ws=
@@ -328,6 +344,15 @@ func AirPortVAPNames(vaps []AirPortVAP) []string {
 // all is every VAP of the daemon (AirPortVAPNames); the script keeps the ones
 // that run, and the isolated ones are in it whether or not the caller listed them.
 func AirPortPFScript(lims []PFLimit, iso []PFIso, all []string) (string, error) {
+	return AirPortPFScriptGuest(lims, iso, all, PFGuest{})
+}
+
+// AirPortPFScriptGuest is AirPortPFScript with the guest policy of the guest
+// VAPs (airport_guest.go): their lines come last, after the isolation ones.
+func AirPortPFScriptGuest(lims []PFLimit, iso []PFIso, all []string, g PFGuest) (string, error) {
+	if err := g.check(iso); err != nil {
+		return "", err
+	}
 	var b strings.Builder
 	b.WriteString(apPFHead)
 	seen := map[string]bool{}
@@ -369,6 +394,15 @@ func AirPortPFScript(lims []PFLimit, iso []PFIso, all []string) (string, error) 
 			}
 		}
 	}
+	for _, v := range g.VAPs {
+		fmt.Fprintf(&b, "gst %s\n", v)
+	}
+	for _, r := range g.PreAllow {
+		fmt.Fprintf(&b, "gp %s\n", r)
+	}
+	for _, r := range g.Restricted {
+		fmt.Fprintf(&b, "gr %s\n", r)
+	}
 	b.WriteString(apPFTail)
 	return b.String(), nil
 }
@@ -381,15 +415,15 @@ func isoNames(iso []PFIso) []string {
 	return out
 }
 
-// SyncAirPortPF makes pf cap what lims say and isolate what iso says; all is
-// every VAP of the last apply. It is idempotent and cheap (no pfctl call at all
+// SyncAirPortPF makes pf cap what lims say, isolate what iso says and hold the
+// guest VAPs to g; all is every VAP of the last apply. It is idempotent and cheap (no pfctl call at all
 // when nothing is wanted and we never loaded a ruleset), so call it after every
 // apply and now and then. It returns one line per change.
-func (cl *Client) SyncAirPortPF(lims []PFLimit, iso []PFIso, all []string) ([]string, error) {
+func (cl *Client) SyncAirPortPF(lims []PFLimit, iso []PFIso, all []string, g PFGuest) ([]string, error) {
 	if !cl.IsAirPort() {
 		return nil, errors.New("not an AirPort base station")
 	}
-	s, err := AirPortPFScript(lims, iso, all)
+	s, err := AirPortPFScriptGuest(lims, iso, all, g)
 	if err != nil {
 		return nil, err
 	}

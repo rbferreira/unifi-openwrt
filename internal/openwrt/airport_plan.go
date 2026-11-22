@@ -41,7 +41,8 @@ func PlanAirPort(cfg translate.Cfg, snap *Snapshot, now time.Time, chans *AutoCh
 		asked, notes = chans.Apply(asked, snap, src, p.Uplink5, now)
 		p.Notes = append(p.Notes, notes...)
 	}
-	vaps, notes := AirPortVAPsNet(asked, p.Uplink5, APNet{UpIf: p.UpIf, Portal: translate.GuestPolicy(cfg).Portal})
+	gp := translate.GuestPolicy(cfg)
+	vaps, notes := AirPortVAPsNet(asked, p.Uplink5, APNet{UpIf: p.UpIf, Portal: gp.Portal, Restricted: gp.Restricted, PreAllow: gp.PreAllow})
 	p.VAPs = vaps
 	p.Notes = append(p.Notes, notes...)
 	p.Notes = append(p.Notes, AirPortCountryNotes(w, snap.Country)...)

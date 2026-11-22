@@ -63,6 +63,9 @@ type AirPortVAP struct {
 	MACPolicy string
 	MACs      []string
 	Isolate   bool
+	// Guest: a guest WLAN (always Isolate too). Its VAP gets the guest policy's
+	// pf rules (airport_guest.go).
+	Guest bool
 	// TxPower in dBm: 0 = the radio's own power. On both radios, the 5 GHz one
 	// with the mesh uplink too (measured: it lowers the uplink's power with it
 	// and the uplink stays associated).
@@ -119,7 +122,7 @@ func AirPortVAPsNet(w translate.Wanted, uplink5 int, an APNet) ([]AirPortVAP, []
 	first := map[string]string{} // parent -> its first VAP
 	hasVAP := map[string]bool{}
 	var vaps []AirPortVAP
-	pmf, badMACs, bigLimit, guestVLAN := 0, 0, 0, 0
+	pmf, badMACs, bigLimit, guests := 0, 0, 0, 0
 
 	for _, l := range w.WLANs {
 		skip := func(why string) {
@@ -170,7 +173,7 @@ func AirPortVAPsNet(w translate.Wanted, uplink5 int, an APNet) ([]AirPortVAP, []
 				v.Isolate = true
 			}
 			if l.Guest {
-				guestVLAN++ // a guest WLAN only gets here on a VLAN
+				guests++
 			}
 			if first[parent] == "" {
 				first[parent] = v.Name
@@ -212,8 +215,8 @@ func AirPortVAPsNet(w translate.Wanted, uplink5 int, an APNet) ([]AirPortVAP, []
 	if len(width) > 0 {
 		notes = append(notes, fmt.Sprintf("channel width not applied (%s): 2.4 GHz stays at 20 MHz, 5 GHz does up to 80 MHz and takes the mesh uplink's width while there is one or the channel is automatic", strings.Join(width, ", ")))
 	}
-	if guestVLAN > 0 {
-		notes = append(notes, fmt.Sprintf("%d guest WLAN(s) on a VLAN: client isolation is forced on; the restricted ranges (and anything else guests may not reach) are the gateway's job on this platform, because the unit cannot filter a VAP's incoming frames", guestVLAN))
+	if guests > 0 {
+		notes = append(notes, fmt.Sprintf("%d guest WLAN(s): client isolation is forced on, and the guest policy's ranges are enforced by pf on this unit (AirPortGuest)", guests))
 	}
 	if badMACs > 0 {
 		notes = append(notes, fmt.Sprintf("MAC filter: %d entr(ies) that are not a MAC address were left out", badMACs))
@@ -335,7 +338,7 @@ func airPortVAP(suffix, parent string, r translate.WantedRadio, l translate.Want
 		w("channel", fmt.Sprint(ch))
 	}
 	return AirPortVAP{Name: name, Parent: parent, SSID: l.SSID, Security: l.Security, Channel: ch, ChannelOf: follow, Tune: tune, Spec: spec, Head: h.String(), Tail: t.String(),
-		Isolate: l.Isolate, TxPower: tx, Devname: l.Devname}
+		Isolate: l.Isolate, Guest: l.Guest, TxPower: tx, Devname: l.Devname}
 }
 
 // UplinkChannel is the channel of the mesh uplink (the client VAP) on the radio
