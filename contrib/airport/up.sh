@@ -3,8 +3,9 @@
 # Started by /mnt/Flash/rc.local. Unpacks and runs the uow daemon, creates a client VAP on
 # the 5 GHz radio (bwl0) with our own wpa_supplicant (the firmware's is broken), puts the
 # uplink in the LAN bridge and leaves the WLANs to the daemon. Then it watches:
-#  - a cable with link on the WAN port = wired uplink: the wireless uplink goes (no loop);
-#  - no WAN link for 20 s: back to the wireless uplink;
+#  - a cable with link on the WAN port that reaches the gateway = wired uplink: the wireless
+#    uplink goes (no loop). A cable that leads nowhere changes nothing;
+#  - no WAN link for 20 s, or the gateway silent on the wire for 45 s: back to the wireless uplink;
 #  - supplicant dead or not associated for 60 s: start over;
 #  - the parent changed channel: the 5 GHz WLANs start again on it;
 #  - the daemon died: start it again.
@@ -29,6 +30,29 @@ wan() {
 		done
 		exit $r
 	}
+}
+# Link on the WAN port says a cable is there, not that it leads to the network. The test is the
+# gateway answering while the wireless uplink is out of the bridge, so the answer can only have
+# come by wire and the two uplinks are never bridged together to find out. Taking the uplink out
+# and putting it back does not make it associate again (measured).
+gw() { route -n get default 2>/dev/null | while read a b; do case "$a" in gateway:) echo $b;; esac; done; }
+gwping() { g=$(gw); [ -n "$g" ] && ping -c 1 -w 2 $g >/dev/null 2>&1; }
+# probe N: 0 when the gateway answers by wire within N tries. The uplink is back in the bridge
+# when it does not.
+probe() {
+	was=0; inbr && { brconfig $BR delete $IF; was=1; }
+	r=1; n=0
+	while [ $n -lt $1 ]; do gwping && { r=0; break; }; n=$((n + 1)); done
+	[ $r = 1 ] && [ $was = 1 ] && brconfig $BR add $IF up
+	return $r
+}
+# The bridge learned the gateway's address on the wired side: a cable started to reach it.
+gwonwire() {
+	g=$(gw); [ -n "$g" ] || return 1
+	m=$(arp -n $g 2>/dev/null | while read a b c d e; do echo $d; done)
+	case "$m" in *:*:*) ;; *) return 1;; esac
+	case "$(brconfig $BR 2>&1)" in *"$m bcmeth"*) return 0;; esac
+	return 1
 }
 # The WLANs are the daemon's: with -apply it runs one hostapd per WLAN the controller asks
 # for, on VAPs wlan10..17 (2.4 GHz, bwl1) and wlan20..27 (5 GHz, bwl0), and keeps its files in
@@ -173,24 +197,45 @@ if [ -n "$(pids /usr/sbin/dhcpd)" ]; then say "dhcpd running (router mode): upli
 cp $D/wpa_supplicant $M/wpa_supplicant; chmod 755 $M/wpa_supplicant
 uow_unpack && HAVE_UOW=1 || HAVE_UOW=0
 
-lost=20; meshing=0; bad=0; upc=
+lost=20; meshing=0; bad=0; upc=; nolink=1; tick=0; dead=0
 while :; do
 	if wan; then
 		lost=0
-		[ $meshing = 1 ] && { leave "cable on the WAN port"; meshing=0; led 2; }
-	else
-		lost=$((lost + 5))
-		if [ $meshing = 0 ] && [ $lost -ge 20 ]; then wquick=; join; meshing=1; bad=0; [ -n "$wquick" ] && bad=60; fi
 		if [ $meshing = 1 ]; then
-			if alive && assoc && ! keybad; then
-				bad=0
-				# the parent changed channel: the 5 GHz WLANs start again on it
-				c=$(upch); [ -n "$upc" ] && [ -n "$c" ] && [ "$c" != "$upc" ] && { say "uplink moved to channel $c"; vaps5_stop; upc=$c; }
-			else
-				bad=$((bad + 5))
+			# Looked at when the cable goes in (3 tries), when the bridge sees the gateway on the
+			# wired side (at most every 15 s), and once a minute (1 try, at most 2 s without the uplink).
+			tick=$((tick + 5)); n=0
+			[ $nolink = 1 ] && n=3
+			[ $n = 0 ] && [ $tick -ge 15 ] && gwonwire && n=2
+			[ $n = 0 ] && [ $tick -ge 60 ] && n=1
+			if [ $n != 0 ]; then
+				tick=0
+				if probe $n; then leave "cable on the WAN port reaches the gateway"; meshing=0; dead=0; led 2
+				elif [ $nolink = 1 ]; then say "cable on the WAN port does not reach the gateway: wireless uplink kept"; fi
 			fi
-			if [ $bad -ge 60 ]; then keybad && { say "uplink: wrong key in $wf"; wfailed; }; leave "not associated for 60 s"; meshing=0; lost=20; bad=0; led 1; fi
+		else
+			# on the wire: a gateway silent for 45 s brings the wireless uplink back
+			if gwping; then dead=0; else dead=$((dead + 5)); fi
+			[ $dead -ge 45 ] && { say "cable on the WAN port, gateway silent for 45 s"; lost=20; dead=0; }
 		fi
+		nolink=0
+	else
+		nolink=1; tick=0; dead=0
+		lost=$((lost + 5))
+	fi
+	if [ $meshing = 0 ] && [ $lost -ge 20 ]; then
+		wquick=; join; meshing=1; bad=0; tick=60; [ -n "$wquick" ] && bad=60
+	fi
+	if [ $meshing = 1 ]; then
+		if alive && assoc && ! keybad; then
+			bad=0
+			inbr || { brconfig $BR add $IF up && say "uplink put back in $BR"; }
+			# the parent changed channel: the 5 GHz WLANs start again on it
+			c=$(upch); [ -n "$upc" ] && [ -n "$c" ] && [ "$c" != "$upc" ] && { say "uplink moved to channel $c"; vaps5_stop; upc=$c; }
+		else
+			bad=$((bad + 5))
+		fi
+		if [ $bad -ge 60 ]; then keybad && { say "uplink: wrong key in $wf"; wfailed; }; leave "not associated for 60 s"; meshing=0; lost=20; bad=0; led 1; fi
 	fi
 	[ $HAVE_UOW = 1 ] && uow_keep
 	sleep 5

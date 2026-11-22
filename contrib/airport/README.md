@@ -225,8 +225,13 @@ nothing in the base station's stored configuration.
    uplink (they would lose their parent), creates a client VAP on `bwl0`, starts
    `wpa_supplicant`, waits for the association, adds the VAP to `bridge0`. The daemon builds
    the VLAN interfaces again on the new uplink within a minute.
-4. Every 5 s: a cable with link on the WAN port removes the wireless uplink (a wired uplink
-   and a wireless one together are a loop); an uplink that is not associated for 60 s is torn
+4. Every 5 s: a cable with link on the WAN port that reaches the gateway removes the wireless
+   uplink (a wired uplink and a wireless one together are a loop). Link alone is not enough:
+   the gateway has to answer a ping while the wireless uplink is out of the bridge, so the
+   answer can only have come by wire. That is tried when the cable goes in, when the bridge
+   learns the gateway's address on the wired side, and once a minute (at most 2 s without the
+   uplink each time). A cable that leads nowhere leaves the wireless uplink in place. On the
+   wire, a gateway silent for 45 s brings the wireless uplink back. An uplink that is not associated for 60 s is torn
    down and tried again; the daemon is started once the bridge has an address (with
    `-apply`, state directory in RAM, SSH on port 2222) and started again if it dies; the
    adoption state is copied to flash when it changes; the daemon's log is emptied when it
@@ -405,7 +410,7 @@ Measured on the unit, and the reason for all of it:
 
 - **Never plug a LAN port into the rest of the network while the mesh is up.** Only the WAN
   port is watched. That the WAN port is PHY index 0 comes from airport-express-tools' notes
-  on the A1392; on the A1470 it was not confirmed with a cable.
+  on the A1392; on the A1470 a cable on the WAN port did trigger the wired branch.
 - **Never run `eraseflash`, and never `flashctl … erase` without a sector number.** The first
   erases `/mnt/Flash` (the base station's configuration, its SSH keys and this kit) even with
   no arguments; it happened here, with the unit running. Recovery without a reboot, as
@@ -478,8 +483,11 @@ test), a guest WLAN without the portal, the transmit power wait after a radio re
 encrypted syslog intake, temperatures and fan in the console (it shows no value for this
 model), and `uow -dump`, `owctl`, `owplan` and `owprobe` against the unit.
 
-Not tested: a cable on the WAN port (the wired-uplink branch of `up.sh` as a whole, and so
-the 5 GHz radio with no uplink on a real unit rather than by hand); the parent changing
+Seen with a cable on the WAN port that led nowhere: the earlier `up.sh` dropped the wireless
+uplink on link alone and the unit was cut off until the cable came out, which is why the
+gateway test exists. Taking the uplink out of the bridge and putting it back was measured by
+hand (no new association). Not tested: the gateway test itself with a cable, a working wired
+uplink (the wired-uplink branch of `up.sh` as a whole, and so the 5 GHz radio with no uplink on a real unit rather than by hand); the parent changing
 channel; an open WLAN and a hidden one through the console; any other AirPort model; a
 parent that is not a UniFi AP.
 
