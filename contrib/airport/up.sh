@@ -87,9 +87,18 @@ uow_keep() {
 	done
 	set -- $(ls -l $M/uow.log 2>/dev/null); [ "${5:-0}" -gt 400000 ] && : > $M/uow.log
 }
+# VLAN interfaces the daemon put on the uplink (WLANs on a VLAN) go before the uplink VAP is
+# destroyed; the daemon notices and builds them again on the new one.
+vlans_stop() {
+	for v in $(ifconfig -l); do
+		case $v in vlan[0-9]*) ;; *) continue;; esac
+		case "$(ifconfig $v 2>&1)" in *"parent interface: $IF"*) ifconfig $v destroy 2>/dev/null;; esac
+	done
+}
 alive() { p=$(cat $M/wpa.pid 2>/dev/null); [ -n "$p" ] && kill -0 $p 2>/dev/null; }
 leave() {
 	vaps5_stop
+	vlans_stop
 	inbr && brconfig $BR delete $IF
 	p=$(cat $M/wpa.pid 2>/dev/null); [ -n "$p" ] && kill $p 2>/dev/null
 	rm -f $M/wpa.pid
@@ -98,6 +107,7 @@ leave() {
 }
 join() {
 	vaps5_stop
+	vlans_stop
 	A=$(cat /var/run/ACPd.pid)
 	kill -STOP $A
 	ifconfig $IF destroy 2>/dev/null

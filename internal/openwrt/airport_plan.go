@@ -21,7 +21,8 @@ type AirPortPlan struct {
 	Notes  []string
 	// SchedKey names the on/off answer of every scheduled WLAN (AirPortSchedule).
 	SchedKey string
-	Uplink5  int // the mesh uplink's channel on the 5 GHz radio, 0 = none
+	Uplink5  int    // the mesh uplink's channel on the 5 GHz radio, 0 = none
+	UpIf     string // the mesh uplink's interface (the parent of the VLANs), "" = none
 }
 
 // PlanAirPort works out the VAPs for cfg on the unit snap describes, at now.
@@ -30,7 +31,7 @@ type AirPortPlan struct {
 // It is what syncAirPort applies and what owplan prints.
 func PlanAirPort(cfg translate.Cfg, snap *Snapshot, now time.Time, chans *AutoChannels, src ScanSource) AirPortPlan {
 	w := translate.Wifi(cfg, snap.RadioNames())
-	p := AirPortPlan{Wanted: w, Uplink5: snap.UplinkChannel("na")}
+	p := AirPortPlan{Wanted: w, Uplink5: snap.UplinkChannel("na"), UpIf: snap.UplinkIface()}
 	asked := w
 	asked.WLANs = append([]translate.WantedWLAN(nil), w.WLANs...)
 	var notes []string
@@ -40,7 +41,7 @@ func PlanAirPort(cfg translate.Cfg, snap *Snapshot, now time.Time, chans *AutoCh
 		asked, notes = chans.Apply(asked, snap, src, p.Uplink5, now)
 		p.Notes = append(p.Notes, notes...)
 	}
-	vaps, notes := AirPortVAPs(asked, p.Uplink5)
+	vaps, notes := AirPortVAPsNet(asked, p.Uplink5, APNet{UpIf: p.UpIf, Portal: translate.GuestPolicy(cfg).Portal})
 	p.VAPs = vaps
 	p.Notes = append(p.Notes, notes...)
 	p.Notes = append(p.Notes, AirPortCountryNotes(w, snap.Country)...)

@@ -70,6 +70,11 @@ type AirPortVAP struct {
 	// Devname is the controller's name for this VAP (wireless.N.devname): the key
 	// of its qos.vap.N rate limit (airport_limit.go).
 	Devname string
+	// VLAN is the network of the WLAN: 0 = the LAN bridge (bridge0), 2..4094 = a
+	// bridge of its own (bridgeN) with vlanN on UpIf, the mesh uplink's interface,
+	// which the daemon only names as vlanN's parent (airport_net.go).
+	VLAN int
+	UpIf string
 }
 
 // Config is the whole hostapd config, with the unit's regulatory ids.
@@ -87,7 +92,11 @@ func (v AirPortVAP) String() string {
 	} else if v.ChannelOf != "" {
 		ch = "channel of " + v.ChannelOf
 	}
-	return fmt.Sprintf("%s on %s: ssid %q, %s, %s", v.Name, v.Parent, v.SSID, v.Security, ch)
+	vl := ""
+	if v.VLAN > 0 {
+		vl = fmt.Sprintf(", VLAN %d", v.VLAN)
+	}
+	return fmt.Sprintf("%s on %s: ssid %q, %s, %s%s", v.Name, v.Parent, v.SSID, v.Security, ch, vl)
 }
 
 // AirPortVAPs turns what the controller wants into the VAPs to run. uplink5 is
@@ -95,6 +104,12 @@ func (v AirPortVAP) String() string {
 // that radio follows its uplink, so the VAPs stay on its channel. The notes
 // say what was left out or approximated, once per kind; none has a passphrase.
 func AirPortVAPs(w translate.Wanted, uplink5 int) ([]AirPortVAP, []string) {
+	return AirPortVAPsNet(w, uplink5, APNet{})
+}
+
+// AirPortVAPsNet is AirPortVAPs with what the WLANs' networks depend on: the
+// mesh uplink's interface (VLANs) and the guest portal (APNet).
+func AirPortVAPsNet(w translate.Wanted, uplink5 int, an APNet) ([]AirPortVAP, []string) {
 	var notes []string
 	radios := map[string]translate.WantedRadio{}
 	for _, r := range w.Radios {
@@ -104,13 +119,14 @@ func AirPortVAPs(w translate.Wanted, uplink5 int) ([]AirPortVAP, []string) {
 	first := map[string]string{} // parent -> its first VAP
 	hasVAP := map[string]bool{}
 	var vaps []AirPortVAP
-	pmf, badMACs, bigLimit := 0, 0, 0
+	pmf, badMACs, bigLimit, guestVLAN := 0, 0, 0, 0
 
 	for _, l := range w.WLANs {
 		skip := func(why string) {
 			notes = append(notes, fmt.Sprintf("wireless.%s (%q on %s): no VAP: %s", l.N, l.SSID, l.Radio, why))
 		}
 		r, ok := radios[l.Radio]
+		vlan, isolate, netSkip := apNetFor(l, an)
 		var parent, digit string
 		switch {
 		case !ok:
@@ -131,10 +147,8 @@ func AirPortVAPs(w translate.Wanted, uplink5 int) ([]AirPortVAP, []string) {
 			skip("radio disabled")
 		case l.Adopt:
 			skip("adoption SSID")
-		case l.Guest:
-			skip("guest network (it needs a bridge of its own)")
-		case l.VLAN != 0:
-			skip(fmt.Sprintf("VLAN %d (it needs a bridge of its own)", l.VLAN))
+		case netSkip != "":
+			skip(netSkip)
 		case l.Security != "none" && l.Security != "psk2":
 			skip("security " + l.Security + " is not supported by this hostapd")
 		case strings.ContainsAny(l.SSID, "\r\n"):
@@ -149,6 +163,15 @@ func AirPortVAPs(w translate.Wanted, uplink5 int) ([]AirPortVAP, []string) {
 			skip(fmt.Sprintf("more than %d WLANs on this radio", apMaxVAPs))
 		default:
 			v := airPortVAP(digit+fmt.Sprint(slots[parent]), parent, r, l, uplink5, first[parent])
+			if vlan > 0 {
+				v.VLAN, v.UpIf = vlan, an.UpIf
+			}
+			if isolate {
+				v.Isolate = true
+			}
+			if l.Guest {
+				guestVLAN++ // a guest WLAN only gets here on a VLAN
+			}
 			if first[parent] == "" {
 				first[parent] = v.Name
 			}
@@ -188,6 +211,9 @@ func AirPortVAPs(w translate.Wanted, uplink5 int) ([]AirPortVAP, []string) {
 	}
 	if len(width) > 0 {
 		notes = append(notes, fmt.Sprintf("channel width not applied (%s): 2.4 GHz stays at 20 MHz, 5 GHz does up to 80 MHz and takes the mesh uplink's width while there is one or the channel is automatic", strings.Join(width, ", ")))
+	}
+	if guestVLAN > 0 {
+		notes = append(notes, fmt.Sprintf("%d guest WLAN(s) on a VLAN: client isolation is forced on; the restricted ranges (and anything else guests may not reach) are the gateway's job on this platform, because the unit cannot filter a VAP's incoming frames", guestVLAN))
 	}
 	if badMACs > 0 {
 		notes = append(notes, fmt.Sprintf("MAC filter: %d entr(ies) that are not a MAC address were left out", badMACs))
@@ -378,6 +404,12 @@ func checkAirPortVAPs(vaps []AirPortVAP) error {
 			return fmt.Errorf("%s: refusing to follow %q", v.Name, v.ChannelOf)
 		case v.Parent != "bwl0" && v.Parent != "bwl1":
 			return fmt.Errorf("%s: refusing parent %q", v.Name, v.Parent)
+		case v.VLAN != 0 && (v.VLAN < apMinVLAN || v.VLAN > apMaxVLAN):
+			return fmt.Errorf("%s: refusing VLAN %d", v.Name, v.VLAN)
+		case v.VLAN != 0 && !apUpIfOK(v.UpIf):
+			return fmt.Errorf("%s: refusing uplink interface %q", v.Name, v.UpIf)
+		case v.VLAN == 0 && v.UpIf != "":
+			return fmt.Errorf("%s: an uplink interface without a VLAN", v.Name)
 		case strings.ContainsAny(v.Head+v.Tail, "\x00\r"):
 			return fmt.Errorf("%s: config has a NUL or a carriage return", v.Name)
 		}
@@ -426,7 +458,7 @@ stop() {
 		alive $1 && kill -9 $(cat $D/$1.pid) 2>/dev/null
 	fi
 	rm -f $D/$1.pid $D/$1.acl $D/$1.pfq # a VAP made again starts with an empty driver ACL and no altq
-	brconfig bridge0 delete $1 >/dev/null 2>&1
+	unbridge $1 -
 	ifconfig $1 destroy >/dev/null 2>&1
 }
 chan() {
@@ -464,7 +496,8 @@ start() {
 		sleep 1
 	done
 	if running $v; then
-		brconfig bridge0 add $v >/dev/null 2>&1 && echo "$v started" || echo "$v failed: brconfig bridge0 add"
+		started="$started $v" # net puts it in its bridge
+		echo "$v started"
 	else
 		echo "$v failed: hostapd did not bring the VAP up (see $D/$v.out)"
 		stop $v
@@ -547,7 +580,7 @@ txpow() {
 // wants, and only names in the radio's own range are ever matched.
 func AirPortApplyScript(vaps []AirPortVAP) string {
 	var b strings.Builder
-	b.WriteString(apScriptHead)
+	b.WriteString(apScriptHead + apNetFuncs)
 	for i, v := range vaps {
 		fmt.Fprintf(&b, "{\ncat <<'%s'\n%s%s\n", delim(v.Head, fmt.Sprintf("UOW_EOF_%dA", i)), v.Head, delim(v.Head, fmt.Sprintf("UOW_EOF_%dA", i)))
 		b.WriteString("echo \"sku=$sku\"\necho \"region=$region\"\n")
@@ -573,6 +606,7 @@ func AirPortApplyScript(vaps []AirPortVAP) string {
 		fmt.Fprintf(&b, "radio %s '%s' %s%s\n", r.parent, r.pat, ch, names)
 	}
 	// after the radios are settled: what is not in a hostapd config
+	b.WriteString(apNetCalls(vaps))
 	for _, v := range vaps {
 		flag := "apbridge"
 		if v.Isolate {

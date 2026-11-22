@@ -968,7 +968,7 @@ var apStubs = map[string]string{
 S=$STUB_STATE
 if [ "$1" = "-l" ]; then
 	out=
-	for f in $S/vap/*; do
+	for f in $S/vap/* $S/vlan/* $S/br/*; do
 		[ -e "$f" ] && out="$out ${f##*/}"
 	done
 	echo ${out# }
@@ -976,6 +976,50 @@ if [ "$1" = "-l" ]; then
 fi
 v=$1
 shift
+case $v in
+vlan[0-9]*|bridge[0-9]*)
+	case $v in vlan*) f=$S/vlan/$v;; *) f=$S/br/$v;; esac
+	case "$1" in
+	create)
+		[ -e $f ] && { echo "ifconfig: SIOCIFCREATE: File exists" >&2; exit 1; }
+		[ -e $S/fail/create ] && exit 1
+		: > $f
+		echo "create $v" >> $S/log
+		exit 0;;
+	destroy)
+		[ -e $f ] || { echo "ifconfig: interface $v does not exist" >&2; exit 1; }
+		[ -e $S/fail/destroy ] && exit 1
+		rm -f $f $S/up/$v
+		for b in $S/br/*; do
+			[ -e "$b" ] && sed "/^$v\$/d" $b > $b.t && mv $b.t $b
+		done
+		echo "destroy $v" >> $S/log
+		exit 0;;
+	vlan) # vlan ID vlanif PARENT
+		[ -e $f ] || exit 1
+		[ -e $S/fail/vlanif ] && exit 1
+		[ -e $S/vap/$4 ] || { echo "ifconfig: $4: no such interface" >&2; exit 1; }
+		echo "$2 $4" > $f
+		echo "vlan $v $2 $4" >> $S/log
+		exit 0;;
+	up)
+		[ -e $f ] || exit 1
+		if [ ! -e $S/up/$v ]; then : > $S/up/$v; echo "up $v" >> $S/log; fi
+		exit 0;;
+	down)
+		rm -f $S/up/$v
+		exit 0;;
+	"")
+		[ -e $f ] || { echo "ifconfig: interface $v does not exist" >&2; exit 1; }
+		echo "$v: flags=8843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST> metric 0 mtu 1500"
+		case $v in vlan*)
+			read id par < $f
+			if [ -n "$par" ] && [ -e $S/vap/$par ]; then echo "	vlan: $id parent interface: $par"; fi;;
+		esac
+		exit 0;;
+	esac
+	exit 1;;
+esac
 case "$1" in
 create)
 	if [ -e $S/vap/$v ]; then echo "ifconfig: SIOCIFCREATE: File exists" >&2; exit 1; fi
@@ -985,6 +1029,9 @@ create)
 destroy)
 	[ -e $S/vap/$v ] || { echo "ifconfig: interface $v does not exist" >&2; exit 1; }
 	rm -f $S/vap/$v $S/run/$v
+	for b in $S/br/*; do # the kernel drops a destroyed interface from its bridge
+		[ -e "$b" ] && sed "/^$v\$/d" $b > $b.t && mv $b.t $b
+	done
 	echo "destroy $v" >> $S/log
 	exit 0;;
 channel)
@@ -1028,8 +1075,51 @@ else
 	echo "	status: no carrier"
 fi
 `,
+	// brconfig BRIDGE [add IF | delete IF | up]: members in S/br/BRIDGE, one per
+	// line; an interface is in one bridge only (add says "Device busy" otherwise)
 	"brconfig": `#!/bin/sh
-echo "bridge $2 $3" >> $STUB_STATE/log
+S=$STUB_STATE
+b=$1
+shift
+[ -e $S/br/$b ] || { echo "brconfig: $b: Device not configured" >&2; exit 1; }
+case "$1" in
+add)
+	[ -e $S/vap/$2 ] || [ -e $S/vlan/$2 ] || { echo "brconfig: $2: Device not configured" >&2; exit 1; }
+	for f in $S/br/*; do
+		while read m || [ -n "$m" ]; do
+			[ "$m" = "$2" ] && { echo "brconfig: $2: Device busy" >&2; exit 1; }
+		done < $f
+	done
+	echo $2 >> $S/br/$b
+	echo "bridge $b add $2" >> $S/log
+	exit 0;;
+delete)
+	found=0
+	while read m || [ -n "$m" ]; do
+		[ "$m" = "$2" ] && found=1
+	done < $S/br/$b
+	[ $found = 1 ] || { echo "brconfig: $2: Invalid argument" >&2; exit 1; }
+	sed "/^$2\$/d" $S/br/$b > $S/br/$b.t && mv $S/br/$b.t $S/br/$b
+	echo "bridge $b delete $2" >> $S/log
+	exit 0;;
+up)
+	[ -e $S/fail/brup ] && exit 1
+	if [ ! -e $S/up/$b ]; then : > $S/up/$b; echo "bridge $b up" >> $S/log; fi
+	exit 0;;
+"")
+	echo "$b: flags=41<UP,RUNNING>"
+	echo "	Configuration:"
+	echo "		priority 32768 hellotime 2 fwddelay 15 maxage 20"
+	echo "	Interfaces:"
+	while read m || [ -n "$m" ]; do
+		echo "		$m flags=3<LEARNING,DISCOVER>"
+		echo "		        port 5 priority 128"
+	done < $S/br/$b
+	echo "	Address cache (max cache: 100, timeout: 1200):"
+	echo "		02:bb:00:00:00:01 wlan9 1103 flags=0<>"
+	exit 0;;
+esac
+exit 1
 `,
 	// -t -F LOG CONF: takes the interface and acs= from CONF; an automatic
 	// channel puts the radio on 11, so a follower has something to follow
@@ -1082,6 +1172,7 @@ type apStubHost struct {
 	sh     string
 	dir    string // the fake device's root, with forward slashes
 	script func(vaps []AirPortVAP) string
+	fix    func(script string, hostapd bool) string // the device's paths become the temporary ones
 	env    []string
 }
 
@@ -1107,7 +1198,8 @@ func newAPStubHost(t *testing.T) *apStubHost {
 		t.Skipf("temporary directory %q has characters the script would not survive unquoted", root)
 	}
 	bin := filepath.Join(dir, "bin")
-	for _, d := range []string{bin, filepath.Join(dir, "state", "vap"), filepath.Join(dir, "state", "run"), filepath.Join(dir, "state", "chan"), filepath.Join(dir, "state", "txp"), filepath.Join(dir, "state", "assoc")} {
+	for _, d := range []string{bin, filepath.Join(dir, "state", "vap"), filepath.Join(dir, "state", "run"), filepath.Join(dir, "state", "chan"), filepath.Join(dir, "state", "txp"), filepath.Join(dir, "state", "assoc"),
+		filepath.Join(dir, "state", "vlan"), filepath.Join(dir, "state", "br"), filepath.Join(dir, "state", "up"), filepath.Join(dir, "state", "fail")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -1124,6 +1216,10 @@ func newAPStubHost(t *testing.T) *apStubHost {
 			t.Fatal(err)
 		}
 	}
+	// the LAN bridge, with the uplink, a firmware VAP and a port in it
+	if err := os.WriteFile(filepath.Join(dir, "state", "br", "bridge0"), []byte("bcmeth1\nwlan0\nwlan9\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "hostap.seed"), []byte("sku=145\nregion=76\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1134,8 +1230,7 @@ func newAPStubHost(t *testing.T) *apStubHost {
 		"STUB_D="+root+"/run",
 		"STUB_REAL_SLEEP="+filepath.ToSlash(realSleep),
 	)
-	h.script = func(vaps []AirPortVAP) string {
-		s := AirPortApplyScript(vaps)
+	h.fix = func(s string, hostapd bool) string {
 		// the device's own paths and PATH line become the temporary ones; every
 		// replaced string must be there, so a change in the script is noticed
 		for _, r := range [][2]string{
@@ -1144,6 +1239,9 @@ func newAPStubHost(t *testing.T) *apStubHost {
 			{apSeedFile, root + "/hostap.seed"},
 			{"/sbin/hostapd", root + "/bin/hostapd"},
 		} {
+			if r[0] == "/sbin/hostapd" && !hostapd {
+				continue
+			}
 			if !strings.Contains(s, r[0]) {
 				t.Fatalf("the script no longer contains %q: update the stub test", r[0])
 			}
@@ -1151,9 +1249,10 @@ func newAPStubHost(t *testing.T) *apStubHost {
 		}
 		return s
 	}
+	h.script = func(vaps []AirPortVAP) string { return h.fix(AirPortApplyScript(vaps), true) }
 	// does the fake device answer at all under this sh?
 	out, err := h.exec("ifconfig -l")
-	if err != nil || strings.TrimSpace(out) != "wlan0 wlan9" {
+	if err != nil || strings.TrimSpace(out) != "wlan0 wlan9 bridge0" {
 		t.Skipf("stub commands do not run reliably under %s on %s (ifconfig -l: %q, %v)", sh, runtime.GOOS, out, err)
 	}
 	return h
@@ -1170,8 +1269,19 @@ func (h *apStubHost) exec(cmdline string) (string, error) {
 // apply runs the script for these VAPs and returns its report lines.
 func (h *apStubHost) apply(vaps []AirPortVAP) []string {
 	h.t.Helper()
+	return h.runScript(h.script(vaps))
+}
+
+// applyNets runs the network step alone (what airportKeep runs).
+func (h *apStubHost) applyNets(vaps []AirPortVAP) []string {
+	h.t.Helper()
+	return h.runScript(h.fix(AirPortNetScript(vaps), false))
+}
+
+func (h *apStubHost) runScript(script string) []string {
+	h.t.Helper()
 	file := filepath.Join(h.dir, "apply.sh")
-	if err := os.WriteFile(file, []byte(h.script(vaps)), 0o600); err != nil {
+	if err := os.WriteFile(file, []byte(script), 0o600); err != nil {
 		h.t.Fatal(err)
 	}
 	cmd := exec.Command(h.sh, "apply.sh")
@@ -1211,8 +1321,20 @@ func (h *apStubHost) logFrom(n int) []string {
 	return l[n:]
 }
 
-// vapsOnDevice is the fake `ifconfig -l`.
+// vapsOnDevice is the fake `ifconfig -l`, the wlan interfaces only.
 func (h *apStubHost) vapsOnDevice() string {
+	h.t.Helper()
+	var wl []string
+	for _, n := range strings.Fields(h.ifaces()) {
+		if strings.HasPrefix(n, "wlan") {
+			wl = append(wl, n)
+		}
+	}
+	return strings.Join(wl, " ")
+}
+
+// ifaces is the whole fake `ifconfig -l`.
+func (h *apStubHost) ifaces() string {
 	h.t.Helper()
 	out, err := h.exec("ifconfig -l")
 	if err != nil {

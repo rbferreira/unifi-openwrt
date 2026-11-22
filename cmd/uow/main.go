@@ -743,6 +743,7 @@ var (
 	// what the last apply asked for, and when it was last looked at (airportKeep)
 	airportVAPs    []openwrt.AirPortVAP // with their MAC filter, isolation and power
 	airportUplink5 int
+	airportUpIf    string // the mesh uplink's interface the VLANs were made on
 	airportChecked time.Time
 	// what the controller asked for before the daemon's own choices (schedules,
 	// automatic channels), and the schedule answer the VAPs were made for
@@ -775,6 +776,23 @@ func syncAirPortLimits(ap *openwrt.Client, first bool) {
 	}
 	if err != nil {
 		log.Printf("LIMITS FAILED: %v", err)
+	}
+}
+
+// syncAirPortNets checks, while a VLAN WLAN exists, that vlanN is still on the
+// uplink and every VAP is in its bridge: the unit's boot script can make the
+// mesh uplink again, and vlanN loses its parent. The script prints nothing when
+// all is as wanted, so the call is cheap; a repair is logged.
+func syncAirPortNets(ap *openwrt.Client) {
+	if !airportApply || !openwrt.HasVLAN(airportVAPs) {
+		return
+	}
+	lines, err := ap.SyncAirPortNets(airportVAPs)
+	for _, l := range lines {
+		log.Printf("  airport: %s", l)
+	}
+	if err != nil {
+		log.Printf("NET FAILED: %v", err)
 	}
 }
 
@@ -825,6 +843,13 @@ func airportKeep(ap *openwrt.Client) {
 	if c := snap.UplinkChannel("na"); c != airportUplink5 {
 		why = fmt.Sprintf("the 5 GHz uplink went from channel %d to %d", airportUplink5, c)
 	}
+	// the uplink is there under another name, or has come up where there was none
+	// (a VLAN WLAN waits for it): the VLANs have to be planned again. An uplink
+	// that is gone is not acted on: it comes back, and the net check below
+	// repairs vlanN then.
+	if u := snap.UplinkIface(); why == "" && u != "" && u != airportUpIf {
+		why = fmt.Sprintf("the mesh uplink is %q, was %q", u, airportUpIf)
+	}
 	for _, v := range airportVAPs {
 		if snap.APVAP(v.Name) == nil {
 			why = v.Name + " is not running"
@@ -837,6 +862,7 @@ func airportKeep(ap *openwrt.Client) {
 		why = airportChans.Reconsider(airportWanted, snap, scans.source, airportUplink5, now)
 	}
 	if why == "" {
+		syncAirPortNets(ap)
 		syncAirPortACL(ap, true)
 		syncAirPortLimits(ap, false)
 		return
@@ -910,7 +936,7 @@ func syncAirPort(ap *openwrt.Client, cfgPath string, apply bool) {
 	}
 	airportLimits = limits
 	airportWanted, airportSchedKey = plan.Wanted, plan.SchedKey
-	airportVAPs, airportUplink5, airportChecked = vaps, uplink5, time.Now()
+	airportVAPs, airportUplink5, airportUpIf, airportChecked = vaps, uplink5, plan.UpIf, time.Now()
 	lines, err := ap.ApplyAirPort(vaps)
 	for _, l := range lines {
 		log.Printf("  airport: %s", l)
