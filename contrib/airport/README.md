@@ -316,7 +316,7 @@ configuration file. Four states, and the third column says what was and was not 
 | Device logins, SSH keys | not done | The login is root with the ACP admin password; changing it from the console could lock the unit out |
 | SNMP | not done | There is no `snmpd` on the unit and the daemon's SNMP step is OpenWrt's only |
 | Mesh uplink credentials | built | The daemon derives the PMK from the console's `mesh.essid` and `mesh.psk` and keeps `/mnt/Flash/mesh/wpa.conf` in step (the old file stays as `wpa.conf.prev`, written only on a real change); `up.sh` falls back to the previous file when a join does not associate. Not yet exercised on the unit. The running uplink is never touched: the new key is used at the next join |
-| Mesh children | not done | The unit does not serve a mesh to other APs |
+| Mesh children | not possible | A VAP with the backhaul SSID and key and `ifconfig VAP dwds` let an OpenWrt 4-address child associate, and the driver dropped its frames (2 to 4 data frames received in minutes). `wl dwds 1` is refused, `wlanmode wds` VAPs cannot be created, and `wl dwds_config` hangs the kernel |
 | `uow -dump`, `owctl`, `owplan`, `owprobe` | built | Take `-ap-platform airport`; not yet run against the unit. `owctl` does kick and LED there, and refuses block (the driver ACLs belong to the daemon). No beep: no sound hardware |
 
 ## How the applier works
@@ -414,6 +414,9 @@ Measured on the unit, and the reason for all of it:
   newfs /dev/rflash2a; mount /mnt/Flash`, copy the host keys back from `/etc/ssh`, reinstall
   the kit, then reboot over ACP: the firmware writes its `ACPData.bin` when it shuts down,
   not at each change.
+- **Never run `wl … dwds_config`.** `wl -i VAP dwds_config enable ap <mac>` returned 0, a second
+  interface with the uplink's name appeared, and the unit stopped answering until it was
+  power-cycled.
 - **Never run `wl … chanim_stats`.** It panics the kernel on both radios. Once the unit rebooted
   and came back on its own; the second time it did not come back by itself.
 - **Never enable `pf` by hand without loading a ruleset first.** The stored one is `block drop
@@ -482,7 +485,7 @@ parent that is not a UniFi AP.
 
 Not done, as the table says: a per-client download limit (not possible with `pf`) and an upload
 limit; WLANs on a VLAN and guest networks with a wired uplink; a captive portal; serving
-mesh children; device logins; SNMP; NTP
+device logins; SNMP; NTP
 and the time zone; 802.11k neighbour lists.
 
 ## Undo
