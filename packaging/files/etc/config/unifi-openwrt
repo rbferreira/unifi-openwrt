@@ -28,3 +28,12 @@ config unifi 'main'
 	# port that is always the uplink, e.g. 'wan' (empty = the port the gateway
 	# is behind, else the first lan port with link)
 	option uplink_port ''
+	# extra source IP allowed to adopt over SSH; the controller in inform_url is
+	# always allowed, so this is only needed when another host does the SSH
+	#option console '192.168.1.1'
+	# fast roaming (802.11r) between this AP and UniFi APs, when the WLAN has
+	# Fast Roaming on: needs the package kmod-veth. 0 = off (clients then do a
+	# full login when they move between this AP and a UniFi AP)
+	option ft_relay '1'
+	# 1 = log every relayed 802.11r frame and roam announcement
+	#option ft_verbose '0'

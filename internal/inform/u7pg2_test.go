@@ -3,10 +3,18 @@
 package inform
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
+	"log"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
+	"time"
 )
 
 func testDevice() Device {
@@ -113,4 +121,119 @@ var requiredPendingFields = []string{
 	"inform_url", "uptime", "time", "cfgversion", "x_authkey", "default",
 	"_default_key", "state", "fw_caps", "isolated", "locating", "selfrun_beacon",
 	"radio_table",
+}
+
+func TestInformIPExported(t *testing.T) {
+	if ip, err := InformIP("http://192.168.0.14:8080/inform"); err != nil || ip != "192.168.0.14" {
+		t.Fatalf("%q %v", ip, err)
+	}
+}
+
+// stubLookup answers lookups from m (host -> IPv4) and fails the rest,
+// with no cached, learned or warned-about hosts before or after the test.
+func stubLookup(t *testing.T, m map[string]string) {
+	old := lookupIP
+	reset := func() {
+		ipMu.Lock()
+		defer ipMu.Unlock()
+		ipCache, learned, warned, failedAt = map[string]ipEntry{}, map[string]string{}, map[string]bool{}, map[string]time.Time{}
+	}
+	reset()
+	lookupIP = func(h string) ([]net.IP, error) {
+		if ip, ok := m[h]; ok {
+			return []net.IP{net.ParseIP(ip)}, nil
+		}
+		return nil, errors.New("no such host")
+	}
+	t.Cleanup(func() { lookupIP = old; reset() })
+}
+
+// A name the AP cannot resolve (OpenWrt's dnsmasq drops private answers)
+// falls back to the controller address learned at adoption, logged once
+// with the DNS fix. A successful lookup still wins; a literal is a literal.
+func TestInformIPLearnedAddr(t *testing.T) {
+	stubLookup(t, map[string]string{"ok.test": "192.0.2.7"})
+	SetInformAddr("unifi.home.example", "192.168.0.14")
+	SetInformAddr("ok.test", "192.168.0.14")
+	SetInformAddr("192.0.2.1", "192.168.0.14")
+	var buf bytes.Buffer
+	w := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(w)
+	for i := 0; i < 2; i++ {
+		if ip, err := InformIP("http://unifi.home.example:8080/inform"); err != nil || ip != "192.168.0.14" {
+			t.Fatalf("learned address: %q %v", ip, err)
+		}
+	}
+	if n := strings.Count(buf.String(), "does not resolve"); n != 1 {
+		t.Errorf("fallback logged %d times, want once:\n%s", n, buf.String())
+	}
+	if !strings.Contains(buf.String(), "rebind_domain='home.example'") {
+		t.Errorf("log lacks the dnsmasq fix: %s", buf.String())
+	}
+	for u, want := range map[string]string{
+		"http://ok.test:8080/inform":   "192.0.2.7",
+		"http://192.0.2.1:8080/inform": "192.0.2.1",
+	} {
+		if ip, err := InformIP(u); err != nil || ip != want {
+			t.Errorf("%s: %q %v, want %s", u, ip, err, want)
+		}
+	}
+	if _, err := InformIP("http://nowhere.test:8080/inform"); err == nil {
+		t.Error("a name with no lookup and no learned address accepted")
+	}
+}
+
+// The inform POST reaches the learned address, with the name as Host.
+func TestDialContextLearnedAddr(t *testing.T) {
+	var host string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { host = r.Host }))
+	defer srv.Close()
+	stubLookup(t, nil)
+	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	SetInformAddr("ctrl.test", "127.0.0.1")
+	c := &http.Client{Transport: &http.Transport{DialContext: DialContext}}
+	resp, err := c.Post("http://ctrl.test:"+port+"/inform", "application/x-binary", strings.NewReader("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if host != "ctrl.test:"+port {
+		t.Errorf("Host %q, want ctrl.test:%s", host, port)
+	}
+}
+
+// With an address to fall back on, a failed lookup is not repeated for a
+// minute; without one it is, so a name that starts to resolve is used at once.
+func TestInformIPFailedLookupRemembered(t *testing.T) {
+	stubLookup(t, nil)
+	n := 0
+	lookupIP = func(string) ([]net.IP, error) { n++; return nil, errors.New("timeout") }
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	SetInformAddr("ctrl.test", "192.0.2.9")
+	for i := 0; i < 5; i++ {
+		if ip, err := InformIP("http://ctrl.test:8080/inform"); err != nil || ip != "192.0.2.9" {
+			t.Fatalf("%q %v", ip, err)
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d lookups in a minute, want 1", n)
+	}
+	ipMu.Lock()
+	failedAt["ctrl.test"] = time.Now().Add(-2 * time.Minute)
+	ipMu.Unlock()
+	InformIP("http://ctrl.test:8080/inform")
+	if n != 2 {
+		t.Errorf("%d lookups after a minute, want 2", n)
+	}
+	n = 0
+	for i := 0; i < 3; i++ {
+		if _, err := InformIP("http://none.test:8080/inform"); err == nil {
+			t.Fatal("a name with no address accepted")
+		}
+	}
+	if n != 3 {
+		t.Errorf("%d lookups for a name with no fallback, want 3", n)
+	}
 }

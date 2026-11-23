@@ -151,7 +151,7 @@ for arch; do
 		--info "arch:$arch" \
 		--info "license:$(mkvar PKG_LICENSE)" \
 		--info "origin:$pkg" \
-		--info "depends:hostapd-utils kmod-nft-bridge iw nftables" \
+		--info "depends:hostapd-utils kmod-nft-bridge kmod-veth iw nftables" \
 		--script "post-install:$work/post-install" \
 		--script "post-upgrade:$work/post-upgrade" \
 		--script "pre-deinstall:$work/pre-deinstall" \

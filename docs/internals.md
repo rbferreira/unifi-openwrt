@@ -96,7 +96,11 @@ Network 10.6 uses two paths; handle both.
    `rsa-sha2-256`, `ssh-rsa`). unifi-openwrt runs a minimal SSH responder
    (`internal/device/sshadopt.go`, default port 2222) that accepts this one
    command and nothing else. If the login fails the device lands in
-   "adoption failed" and only Remove helps.
+   "adoption failed" and only Remove helps. The responder accepts
+   connections only from the controller: The host of the configured inform
+   URL, the host the device informs to now (the controller can move the
+   inform URL at runtime; a host name is looked up), the address in
+   `option console` and the AP's own address. Any other source is refused.
 2. **Inform reply.** A `setparam` whose `mgmt_cfg` holds `authkey=` and
    `use_aes_gcm=true`. Accept a new key from `mgmt_cfg` only while still on
    the factory key (otherwise a device can get stuck re-adopting).
@@ -114,14 +118,33 @@ controller shows it as connected.
   From `mgmt_cfg` the daemon takes `cfgversion`, `authkey` (only while on the
   factory key), `use_aes_gcm`, `led_enabled` and `inform_url` ("Override
   inform host": The controller repeats the setparam until the device reports
-  that address). A setparam repeated unchanged is answered at once three
-  times, then at the normal interval.
+  that address). The AP looks an inform host name up itself; while the name
+  does not resolve there (OpenWrt's dnsmasq drops answers with private
+  addresses), `inform_ip`, the POST and the reachability check after an
+  apply use the controller address learned when the URL moved to that name:
+  The SSH peer of `set-adopt`, else the previous URL's address
+  (`inform_addr` in `state.json`; the log says once how to fix the AP's
+  DNS). A failed lookup is tried again after a minute. A setparam repeated unchanged is answered at once three times, then
+  at the normal interval.
 - An empty reply means "nothing". After a bad answer the daemon keeps
   informing, up to a minute apart.
 - `cmd`: `set-adopt`, `set-locate` / `unset-locate`, `kick-sta`,
   `block-sta` / `unblock-sta` (with `mac`), `authorize-guest` /
   `unauthorize-guest`, `scan`, `spectrum-scan`, `reboot`, `setdefault`.
 - Top-level `_type` `reboot`, `setdefault`, `upgrade`.
+- Refused on purpose, with a log line:
+  - `get-support-file` (`token`, `pinned_pubkey`, `upload_url`): A UniFi AP
+    packs logs and settings into a `tar.gz` and posts it to `upload_url` as
+    a multipart form (`file`), with `Authorization: Bearer <token>` and the
+    server's key pinned, expecting 204. The bundle is for Ubiquiti's
+    support; for a report to this project there is `uow -dump`.
+  - `build-ssh-session` (`uuid`, `stun`, `turn`, `username`, `password`,
+    `ttl`), `ssh-sdp-answer`, `close-ssh-session`: The debug terminal. A
+    UniFi AP offers a WebRTC data channel through the given STUN/TURN
+    servers (a third party's) and runs a shell on it. OpenWrt has SSH.
+  - `run` (`shellcmd`): UniFi firmware runs the command.
+  The raw reply of an unknown request is logged without the values of
+  secret-looking fields (tokens, passwords, keys).
 
 **What nothing acts on is listed.** A reply `_type` or `cmd` the daemon
 does not know, a reply field or `mgmt_cfg` key it does not read, and a
@@ -212,23 +235,24 @@ A requested feature the AP lacks is left off and noted ("clamped").
 
 | system_cfg | OpenWrt |
 |---|---|
-| `radio.N.channel`, `ieee_mode` (`11nght20`, `11naht40`, `11acvht80`, ...), `txpower` (`auto` or dBm), `countrycode` | `wifi-device` `channel`, `htmode`, `txpower` (deleted for auto), `country`. Each reported radio maps to its own `wifi-device` (from `ubus call network.wireless status`), so two radios of one band (5 GHz low and high) stay apart; without that status a band maps to its first `wifi-device`. Never by phy number (phys can renumber after a reboot) |
+| `radio.N.channel`, `ieee_mode` (`11nght20`, `11naht40`, `11acvht80`, ...), `txpower_mode` (`auto`/`high`/`medium`/`low`/`custom`), `txpower` (`auto` or dBm, used only with `custom` or when no mode is sent), `countrycode` | `wifi-device` `channel`, `htmode`, `txpower` (deleted for `auto`/`high` = the country's maximum; `medium` = maximum - 6 dB, `low` = maximum - 12 dB, never below the radio's minimum or 1; Ubiquiti does not publish its exact values, so these are an approximation within the range genuine APs use; with an unknown maximum the radio stays at maximum and a note is logged), `country`. Each reported radio maps to its own `wifi-device` (from `ubus call network.wireless status`), so two radios of one band (5 GHz low and high) stay apart; without that status a band maps to its first `wifi-device`. Never by phy number (phys can renumber after a reboot) |
 | `radio.outdoor=enabled` | `country3 0x4f` + `ieee80211d 1` (the Country IE environment byte; channel rules stay the country's) |
 | `wireless.N` + `aaa.N` (one per radio x WLAN) | a `wifi-iface` per radio: `ssid`, `hidden`, `isolate` (`l2_isolation`), `uapsd`, `dtim_period`, `disabled`, `network`. Matched to an existing interface by SSID and radio, else created as `unifi_<radio>_<N>` |
 | `aaa.N.wpa`, `wpa.key.N.mgmt`, `wpa3.support`, `wpa3.transition`, `pmf.*` | `encryption` (`psk2+ccmp`, `sae`, `sae-mixed`, ...), `ieee80211w`, `key`. A WPA2/WPA3 WLAN arrives as `mgmt=SAE` plus `wpa3.transition=enabled` |
 | key management | `hostapd_bss_options wpa_key_mgmt=SAE WPA-PSK` (+ `FT-SAE FT-PSK` with 802.11r). OpenWrt adds `WPA-PSK-SHA256` whenever PMF is optional; a UAP does not, and some older Apple clients skip a BSS that offers it |
 | `aaa.N.ft.status`, `11k.status`, `bss_transition` | `ieee80211r`, `ieee80211k`, `bss_transition` (if the probe allows) |
-| `macacl.N.*` (keyed by VAP devname) | `macfilter allow/deny` + `maclist`; no filter = options deleted (OpenWrt rejects `macfilter disable`) |
+| `macacl.N.*` (keyed by VAP devname) | `macfilter allow/deny` + `maclist`; no filter = options deleted (OpenWrt rejects `macfilter disable`). A plan with nothing but MAC filter changes is applied in the running hostapd (`deny_acl`/`accept_acl`, and the `/var/run/hostapd-<if>.maclist` file) without a Wi-Fi reload: only clients the change denies are disconnected, and blocked clients stay on the deny list. A switch to or from allow, a plan with other changes, a missing `hostapd_cli`, or a list that does not read back as wanted reloads as before. After a live change UCI is committed but netifd's memory is not, and netifd restarts a BSS on a reload only if its config differs from what it last loaded. So after every apply that is not live, after a rollback, and once at start, the daemon also brings hostapd's lists in line with UCI the same way (no restart). Otherwise a later reload could leave a BSS running with older lists. |
 | `wireless.N.minrate_data`, `beacon_rate`, `mgmt_rate`, `minrate_cck_rates` | radio `supported_rates` / `basic_rate`, only when every WLAN on the radio raised its minimum (OpenWrt applies rates per radio; per-BSS beacon rates need driver support) |
 | `wireless.N.schedule_*` | AP-side cron script `/etc/unifi-openwrt/schedule.sh` that flips the interface; the controller does not toggle scheduled WLANs itself |
 | `stamgr.N.minrssi.*` | radio `rssi_reject_assoc_rssi`; the daemon also kicks clients below the minimum for 30 s. `minrssi.rssi` may arrive as RSSI above noise (value - 95 = dBm) |
 | `stamgr.N.loadbalance.*` | `maxassoc` on the radio's UniFi interfaces |
+| `wireless.N.btm_disassoc.*` (Roaming Assistant, sent for 5 GHz VAPs) | no UCI option: a client of that SSID and radio below `threshold` on every reading for 30 s gets an 802.11v BSS transition request from the daemon (`bss_transition_request`: disassociation imminent; candidates: the other APs of the SSID in the interface's 802.11k neighbour list, never this AP's own BSSes (the list holds its other band), abridged; with none left, no list and not abridged, so the client scans and picks the best AP itself), again at most once a minute while it stays below. Only clients that announced BSS transition (extended capabilities bit 19). Never a disconnect: no disassociation timer (hostapd disassociates when one runs out); minimum RSSI stays the hard limit. `threshold` may arrive as RSSI above noise (value - 95 = dBm) |
 | `bandsteering.*` | usteer in local mode (`prefer_5g`, `equal`), stopped when off |
 | `qos.vap.N.*` (user-group rate limits, kbps) | per-client tc HTB shaping on the VAP (download) and an IFB (upload); nftables policing if tc is missing |
 | `aaa.N.is_guest`, `ebtables`, `iptables`, `ipset`, `redirector` | nftables bridge table for guest isolation, guest DNS forwarder, portal redirect. See [Guest WLANs](#guest-wlans-and-the-guest-portal) |
 | `vlan.N`, `bridge.N` | per-VLAN bridge on the cable port. See [VLANs](#vlans) |
 | `mesh.*`, the `vwire` VAP | mesh-uplink watcher. See [Mesh](#mesh-wireless-uplink) |
-| `system.timezone`, `ntpclient.N.server` | `system.@system[0].timezone`, `system.ntp.server` |
+| `system.timezone`, `ntpclient.N.server` | `system.@system[0].timezone`, `system.ntp.server`. The daemon also compares the AP's clock with the controller's once a minute (`server_time_in_utc` in every reply). More than 30 s apart: It restarts `sysntpd`, and if the clock is still off two minutes later it sets the controller's time. Reason: On an AP with a DHCP address, OpenWrt can start the jailed `ntpd` before the lease arrives; the jail keeps the empty `resolv.conf` of that moment, so `ntpd` never resolves its servers and the clock stays wrong after every boot |
 | `netconf`, `dhcpc`, `route`, `resolv` (management IP) | `network.lan` `proto dhcp` or `static` (`ipaddr`, `netmask`, `gateway`, `dns`). A static address other than the one the daemon reaches the AP on is refused |
 | `users.N` (site Device SSH Authentication, sha512-crypt) | extra uid-0 logins in `/etc/passwd` / `/etc/shadow`; only accounts listed in `/etc/unifi-openwrt/users` are touched, never root or system accounts |
 | `syslog.remote.*` | Plain: `logd` with `log_ip` / `log_port` / `log_proto`; encrypted: The daemon forwards itself ([Encrypted remote syslog](#encrypted-remote-syslog)) |
@@ -258,8 +282,9 @@ fields), `internal/openwrt/satisfaction.go`.
 ### Reading the AP
 
 Every inform: `ubus call system board` / `info`, `ubus call iwinfo devices`
-then `info`, `assoclist`, `txpowerlist` per interface, `iw survey dump`,
-antenna masks, `/sys/class/net/*/statistics`, `/proc/net/arp`, `/proc/stat`.
+then `info`, `assoclist`, `txpowerlist` and hostapd's `get_clients` per
+interface, `iw survey dump`, antenna masks, `/sys/class/net/*/statistics`,
+`/proc/net/arp`, `/proc/stat`.
 One reading takes about 0.2 s on a dual-core ARM AP. Interfaces are
 discovered each time (phy numbers can change after a reboot); the daemon's
 own scan interface `uowscan*` is skipped.
@@ -297,6 +322,21 @@ Clients are only in `vap_table[].sta_table[]` (never top level): `mac`,
 `tx_bytes`, `rx_bytes`, `tx_retries`, `ip` (from the ARP table),
 **`chwidth`** (an index: 0 = 20, 1 = 40, 2 = 80, 3 = 160 MHz; the larger of the rx and tx widths),
 `satisfaction`, `anomalies`, `authorized` (guests).
+Also, as a UAP reports them (checked against a UAP-AC-Pro 6.8.2's own
+inform):
+`is_11n` / `is_11ac` / `is_11ax` from hostapd's flags for the association
+or from the current rates, whichever says yes (the rates alone are not
+enough: A Wi-Fi 4 client's keep-alives go at legacy rates); `tx_mcs` (the tx rate's MCS index, -1 for
+a legacy rate) and `nss` (spatial streams of the rates, the most seen for
+the client; left out until known), from which the UI shows Wi-Fi 4/5 and
+1x1/2x2 (`radio_proto` is the controller's own: `g` for a client without
+HT, `ng` with); `wifi_tx_attempts` (tx packets + retries),
+`wifi_tx_dropped` (tx failed) and the movement since the previous inform,
+`wifi_tx_attempts_mov`, `tx_retries_mov`, `wifi_tx_dropped_mov` (0 on the
+first reading and when the counters restart): the controller computes the
+retry percentage from the `_mov` fields; `tx_retry_burst_count` 0;
+`tx_power` (the radio's, in half dB: 34 at 17 dBm). No `ccq`: a UAP's is not
+a retry ratio (877 for a client with 912 retries on 985 packets).
 
 The controller hides its own element-adopt and mesh VAPs in its device
 view but keeps the user ones.
@@ -316,9 +356,11 @@ comes up.
 
 ### Ports: `if_table`, `port_table`
 
-Ports are the interfaces with a `device` link in sysfs, other than `eth*`
-(the CPU port behind DSA), bridges and radios; virtual ones (`miireg` on the
-Linksys MX4300, tunnels, VLAN devices) have none and are left out.
+Ports are the interfaces with a `device` link in sysfs, other than bridges,
+radios and a switch's CPU port (a DSA conduit, which has a `dsa` directory in
+sysfs). Virtual ones (`miireg` on the Linksys MX4300, tunnels, VLAN devices)
+have no `device` link and are left out. An `eth0` that is a jack of its own,
+as on an AP without a switch, is a port.
 
 `if_table[0]` (`eth0`, with `num_port`) and `port_table` (port 1 = the
 uplink port, then the others: `media`, `speed`, `full_duplex`, `up`,
@@ -663,10 +705,10 @@ inform VAP whose `name` equals the inform's `uplink`, with `usage: "uplink"`,
 `rx_packets` > 0 is resolved to the parent device: The station's
 `serialno` if it is a MAC, else the ESSID `(vwire|vport)-<12 hex>`. The
 site mesh ESSID has 16 hex digits, so `serialno` is needed. The daemon sends
-the parent BSSID as the one station and, as `serialno`, the device on the LAN
-whose MAC shares bytes 2-5 with that BSSID (UniFi BSSIDs keep the device
-MAC's middle four bytes). The controller then sets `uplink.type=wireless`,
-`uplink_ap_mac`, `is_mesh_v3`, signal and rates.
+the parent BSSID as the one station and, as `serialno`, the LAN device that
+BSSID belongs to (matched as in [RF scan](#rf-scan-and-80211k-neighbour-list)).
+The controller then sets `uplink.type=wireless`, `uplink_ap_mac`,
+`is_mesh_v3`, signal and rates.
 
 The label can stay "wire" while the controller still holds a fresher
 topology entry for the AP from the switch that saw it wired
@@ -802,8 +844,13 @@ From the decompiled controller (`UQKIrjV`, `DRUVu`, `gliBtHTTrWRd`):
   list (`stat/rogueap`); **a non-UniFi row whose ESSID is one of the site's
   WLANs raises a rogue-AP alarm**. `is_unifi` + `serialno` (device MAC)
   mark a sibling. So the daemon leaves out its own BSSIDs and site-SSID rows
-  it cannot match to a LAN device (BSSID bytes 2-5 = a LAN device's MAC
-  bytes 2-5).
+  it cannot match to a LAN device. A BSSID belongs to a device when its
+  second and third bytes are the device MAC's and of the last three bytes
+  at most one differs, higher by 1-15; the first byte does not count
+  (UAP-AC-Pro `48:a1:01:13:27:5c` has `52:a1:01:14:27:5c`, U7 Lite
+  `70:e5:f6:47:9c:3a` has `76:e5:f6:47:9c:3b`). The LAN devices are the
+  MACs in the ARP table and the br-lan FDB: the ARP table holds only the
+  hosts the AP talks to itself, so it rarely has the other APs.
 - `radio_table[i].spectrum_table`: `[{channel, width, center_freq,
   utilization, interference}]`, with `spectrum_table_time` = age in
   seconds. Served by `stat/spectrum-scan/<mac>`. Top-level
@@ -844,3 +891,144 @@ hour) and its own BSS of the same SSID on the other band, with
 every 5 minutes and right after each Wi-Fi reload (hostapd forgets the list
 on restart). Element: BSSID, BSSID info `0x08af` (+`0x1000` VHT on 5 GHz),
 the 20 MHz operating class (81, 115, 118, 121, 125), channel, PHY type 7/9.
+
+## 802.11r: Fast roaming with UniFi APs
+
+With Fast Roaming on, a client moves between this AP and genuine UniFi APs
+without a new login, in both directions. Code: `internal/ftrelay`,
+`translate.planFT`, `cmd/uow/ft.go`.
+
+### Why it does not work by itself
+
+To roam fast, the AP a client moves to needs a key (PMK-R1) from the AP of
+the client's last full login (the R0KH). Both vendors run hostapd and fetch
+that key with hostapd's RRB-OUI frames (EtherType 0x88b7, OUI 00:13:74,
+subtype 0x0001), encrypted with a key all APs of the WLAN share. Three
+things differ:
+
+- **The frame.** UniFi's hostapd sends from the AP's Ethernet address, not
+  from the BSSID, and carries both BSSIDs after the frame type. Each side
+  drops the other's frames as too short:
+
+  ```
+  upstream: 00 13 74 00 01 | type | auth_len | auth TLVs | encrypted
+  UniFi:    00 13 74 00 01 | type | src BSSID | dst BSSID | auth_len | auth TLVs | encrypted
+  ```
+
+- **The mobility domain.** UniFi firmware uses the first two bytes of
+  SHA-1("salt" + the SSID padded with zeros to 32 bytes); OpenWrt the start
+  of MD5(SSID). A client only tries a fast roam inside one domain.
+- **The key.** The controller makes one per WLAN and sends it as
+  `aaa.N.iapp_key`; OpenWrt derives its own from the password.
+
+The frame difference was found and documented by
+[rrb-unifi](https://github.com/d-malinowski/unifi-openwrt-roaming). The
+layouts were checked here against frames of a UniFi Express 7.
+
+### Settings
+
+For a WLAN with `aaa.N.ft.status=enabled` and an `iapp_key`, when the relay
+can run:
+
+| UCI option | Value |
+|---|---|
+| `mobility_domain` | UniFi's, from the SSID |
+| `ft_psk_generate_local` | `0`: Keys are fetched, not computed from the password (UniFi APs never compute them) |
+| `pmk_r1_push` | `1` |
+| `r0kh`, `r1kh` | The two wildcard entries with the controller's key, as UniFi firmware writes them. hostapd learns each UniFi BSS from the first exchange |
+
+**Only what the other APs offer.** A UniFi Express 7 gives fast roaming to
+WPA3 clients only (`PSK SAE FT-SAE` on air, whatever the controller's
+"WPA3 fast roaming" switch says), where OpenWrt would give it to WPA2
+clients too. A client that used FT-PSK here and then joined such an AP by a
+normal login can try a fast roam back with keys that are no longer good,
+and is refused once. So the daemon reads the key types of the WLAN's other
+APs from its scans (the BSSes it also uses for the 802.11k list) and leaves
+off the fast-roaming type that one of them lacks: `FT-PSK` if an AP offers
+`PSK` without it, `FT-SAE` if an AP offers `SAE` without it. What it saw is
+kept in `ft_peers.json` in the state directory for a week after the last
+sighting, so a scan that misses the neighbour does not change the Wi-Fi
+back and forth.
+
+`nasid` stays OpenWrt's default, the BSSID without colons, which is what
+UniFi APs use too. Without the relay, or with Fast Roaming off, these
+options are deleted again and OpenWrt's defaults apply: The AP is then in a
+mobility domain of its own, and clients do a normal login when they move
+between it and a UniFi AP.
+
+### The relay
+
+hostapd keeps its normal interface for these frames, the bridge of the
+WLAN's network (`ft_iface`, OpenWrt's default).
+
+- **Out:** A raw socket on the bridge sees hostapd's frames as they leave.
+  The relay sends each again in UniFi's layout, from the bridge's own
+  address, to the Ethernet address of the UniFi AP if it knows it (learned
+  from that AP's frames), else to everyone. The originals leave too; UniFi
+  APs drop them.
+- **In:** A frame in UniFi's layout is rebuilt in upstream's, with the two
+  BSSIDs as its Ethernet addresses, and written into one end of a veth pair
+  whose other end is a port of the bridge. It arrives at the bridge like a
+  frame from the network, addressed to the BSSID, and goes up to hostapd's
+  socket. A broadcast becomes one copy per BSS of that bridge. The bridge
+  floods nothing into that port.
+
+The pair (`uowft0`/`uowfp0`, one per bridge) is made by the daemon at run
+time with netlink and removed when it stops. Every 15 seconds the daemon
+reads hostapd's running configuration again and repairs the port if a
+network reload took it out of the bridge. Translating needs no key.
+
+**Why this layout.** The other way to do it is to point hostapd at a veth
+of its own (`ft_iface` in the Wi-Fi configuration) and relay between that
+and the LAN. Then the Wi-Fi configuration depends on an interface that only
+exists while extra packages are installed: After a firmware upgrade that
+drops them, hostapd cannot start the BSS, and the AP has no Wi-Fi until
+someone repairs it over a cable. Here nothing in `/etc/config` names
+anything the relay makes. Without the daemon or without `kmod-veth` the
+Wi-Fi starts as on any OpenWrt AP; only the key exchange with UniFi APs
+stops, and the next plan takes the UniFi settings out again.
+
+A loopback interface as `ft_iface` needs no kernel module at all, but
+hostapd then hears its own frames and can learn a peer at its own address.
+
+### Roam announcements
+
+A client says nothing to the AP it leaves. UniFi APs therefore broadcast
+"this client is mine now" at every association (EtherType 0x890d to
+01:80:c2:00:00:1c), and the AP that had it drops it at once:
+
+```
+01 f0 1a 00 | sender BSSID (6) | wlan id (2) | AES key wrap (32) | 20 zero bytes
+wrapped:      time in seconds (LE32) | client MAC (6) | 14 zero bytes
+```
+
+The wlan id is the mobility domain, the key (RFC 3394 key wrap) the WLAN's
+`iapp_key`. The daemon sends one when hostapd authorizes a client (it
+follows `AP-STA-CONNECTED` in the system log, which does not touch
+hostapd), and on a UniFi AP's announcement it removes that client here
+(`del_client`, reason 8), unless the client joined here after the
+announcement's time. An announcement more than 60 s from the AP's clock is
+ignored, on both sides, so the clock matters (see the time row in
+[Mapping](#mapping)).
+
+### Tested
+
+OpenWrt 25.12.6 (TP-Link OnHub) and a UniFi Express 7, WPA2/WPA3 WLAN:
+
+- 178 ordered roams of a WPA3 test client across the four radios, first
+  login on either AP: All fast. Typically 120 to 150 ms, at most 240 ms;
+  470 ms for the first roam after a Wi-Fi restart of the OpenWrt AP.
+- A walk with a WPA3 laptop, both ways: Fast. One lost ping (0.2 s) one
+  way; 2.2 s the other, spent before the roam, while the client held on to
+  a weak 6 GHz signal.
+- With the daemon stopped, roams went on with the keys both sides had.
+
+### Not built, not tested
+
+- FT over the DS (`ft_over_ds` stays 0, the UniFi default).
+- Several OpenWrt APs with the relay, more than one UniFi AP, WLANs on a
+  VLAN bridge (built: One pair per bridge; not tested).
+- Phones.
+
+Switch: `option ft_relay '0'` in `/etc/config/unifi-openwrt`;
+`option ft_verbose '1'` logs every relayed frame.

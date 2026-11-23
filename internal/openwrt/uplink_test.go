@@ -48,7 +48,7 @@ func TestMeshUplinkFields(t *testing.T) {
 func TestNeighboursFromFDB(t *testing.T) {
 	s := &Snapshot{ARP: map[string]string{"aa:bb:cc:00:00:01": "192.168.1.9"},
 		FDB: []FDBEntry{{MAC: "40:11:22:33:44:01", Port: 8}, {MAC: "5A:11:22:33:44:03", Port: 8}, {MAC: "02:aa:bb:cc:dd:01", Port: 1, Local: true}}}
-	n := s.neighbours()
+	n := s.Neighbours()
 	if _, ok := n["02:aa:bb:cc:dd:01"]; ok {
 		t.Error("the AP's own address counted as a neighbour")
 	}

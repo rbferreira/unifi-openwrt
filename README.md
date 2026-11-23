@@ -70,10 +70,10 @@ So this repo does two things:
   [docs/internals.md](docs/internals.md), so it can be checked, ported to other devices, or carried
   on by anyone.
 
-> **Tested on four devices only**, listed under
+> **Tested on five devices only**, listed under
 > [Tested devices](#tested-devices). Other OpenWrt devices, other UniFi
-> models and other controller versions are **best effort**: They may work,
-> they have not been tried. Reports are welcome.
+> models and other controller versions are **best effort**: They will very
+> likely work, they just have not been tried yet. Reports are welcome.
 
 **It never applies Ubiquiti firmware.** Upgrade requests from the controller
 are answered and ignored; Ubiquiti firmware would brick a non-Ubiquiti
@@ -117,11 +117,14 @@ device.
    /etc/init.d/unifi-openwrt start
    ```
 
-   The inform URL needs an IP address, not a host name. Other options in the
-   file: `hostname`, `profile_caps`, `locate_beep`, `mesh_uplink`,
+   Put an IP address into the inform URL: A host name only works if the AP
+   can resolve it. Other options in the file: `hostname`, `profile_caps`,
+   `locate_beep`, `mesh_uplink`,
    `ssh_port` (adoption SSH responder, default 2222), `hw_caps`,
    `inform_every`, `led_idle`, `uplink_port` (the port that is always the
-   uplink, e.g. `wan`).
+   uplink, e.g. `wan`), `console` (one more address that may adopt over SSH;
+   the controller in the inform URL always may), `ft_relay` (fast roaming
+   with UniFi APs, on by default) and `ft_verbose`.
 5. **Adopt.** The AP shows up in the UniFi as pending adoption, with the
    chosen model's name. Click Adopt.
 6. **Watch the log:** `logread -e uow`. It shows the adoption, every plan of
@@ -134,16 +137,17 @@ pending; OpenWrt and its Wi-Fi are not reset), then
 
 ## Tested devices
 
-| Device | Hardware | OpenWrt | Adopted as | Tested by | What was tested |
-|---|---|---|---|---|---|
-| [Google OnHub (TP-Link TGR1900)](https://openwrt.org/inbox/toh/google/onhub_tp-link_tgr1900) | Qualcomm IPQ8064, Wi-Fi 5 | 25.12.6 | UAP-AC-Pro (`U7PG2`) | [@antoniocosta](https://github.com/antoniocosta) | Everything under [What works](#what-works) unless marked otherwise, with UniFi Network 10.6 on a UniFi Express 7 |
-| [Linksys LN1301 (MX4300)](https://openwrt.org/toh/linksys/mx4300) | Qualcomm IPQ8174 (`ath11k`), Wi-Fi 6, one 2.4 GHz and two 5 GHz radios | 25.12.6 | U6-IW | [@dohun0310](https://github.com/dohun0310) | Wired, as an AP and small switch: Package install and adoption, all three radios, the 160 MHz option, wired clients on the LAN ports, in-wall port numbering |
-| [Linksys E4200 v2](https://openwrt.org/toh/hwdata/linksys/linksys_e4200_v2) | Marvell Kirkwood, 2x 88W8366 (`mwl8k`), Wi-Fi 4 | 23.05.6 | UAP Pro (`U7P`) | [@rbferreira](https://github.com/rbferreira) | Package install, SSH adoption with the controller on another address, the rollback timer, mesh uplink to a UniFi AP (a U7 Lite), with UniFi Network 11.1.50 on a UCG Ultra |
-| [TP-Link Archer BE800](https://forum.openwrt.org/t/openwrt-for-tp-link-be800/227055) | Qualcomm IPQ9574 (`ath12k`), Wi-Fi 7, one phy for 2.4, 5 and 6 GHz | Snapshot | U7 Pro (`U7PRO`) | [@Kelon5212001](https://github.com/Kelon5212001) | Adoption, all three radios, WLANs applied. Tested on 0.2.0 plus the fixes; confirmation on the merged code is pending. The mesh uplink joins but does not pass traffic (driver limit) |
-
 Running it on another device? Open an issue or a pull request with the
-device, the OpenWrt version, the UniFi model and what you tested, and it
-gets a row here.
+device, the OpenWrt version, the UniFi model, the UniFi Network version and
+console, and what you tested, and it gets a row here.
+
+| Device | Hardware | OpenWrt | Adopted as | UniFi | Tested |
+|---|---|---|---|---|---|
+| [Google OnHub (TP-Link TGR1900)](https://openwrt.org/inbox/toh/google/onhub_tp-link_tgr1900) | Qualcomm IPQ8064, Wi-Fi 5 | 25.12.6 | UAP-AC-Pro (`U7PG2`) | Network 10.6 on an Express 7 | By [@antoniocosta](https://github.com/antoniocosta): Everything under [What works](#what-works) unless marked otherwise |
+| [Linksys LN1301 (MX4300)](https://openwrt.org/toh/linksys/mx4300) | Qualcomm IPQ8174 (`ath11k`), Wi-Fi 6, one 2.4 GHz and two 5 GHz radios | 25.12.6 | U6-IW | Not reported | By [@dohun0310](https://github.com/dohun0310): Wired, as an AP and small switch. Package install and adoption, all three radios, the 160 MHz option, wired clients on the LAN ports, in-wall port numbering |
+| [Linksys E4200 v2](https://openwrt.org/toh/hwdata/linksys/linksys_e4200_v2) | Marvell Kirkwood, 2x 88W8366 (`mwl8k`), Wi-Fi 4 | 23.05.6 | UAP Pro (`U7P`) | Network 11.1.50 on a UCG Ultra | By [@rbferreira](https://github.com/rbferreira): Package install, SSH adoption with the controller on another address, the rollback timer, mesh uplink to a UniFi AP (a U7 Lite) |
+| [TP-Link Archer BE800](https://forum.openwrt.org/t/openwrt-for-tp-link-be800/227055) | Qualcomm IPQ9574 (`ath12k`), Wi-Fi 7, one phy for 2.4, 5 and 6 GHz | Snapshot | U7 Pro (`U7PRO`) | Not reported | By [@Kelon5212001](https://github.com/Kelon5212001): Adoption, all three radios, WLANs applied. Tested on 0.2.0 plus the fixes; confirmation on the merged code is pending. The mesh uplink joins but does not pass traffic (driver limit) |
+| [D-Link DIR-878 A1](https://openwrt.org/toh/d-link/dir-878_a1) | MediaTek MT7621, Wi-Fi 5 | 25.12.6 | UAP-AC-Pro (`U7PG2`) | Network 10.6.109 | By [@Lukas-Heiligenbrunner](https://github.com/Lukas-Heiligenbrunner): SSH adoption after the inform address changed, and "Override inform host" set to a name; the neighbour list next to two UAP-AC-Pros and a U7 Lite |
 
 ## What works
 
@@ -155,21 +159,22 @@ Tested live on the OnHub unless marked otherwise (see [Tested devices](#tested-d
 |---|---|
 | Adoption, Remove, adopt again | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works (SSH and inform-reply adoption) |
 | Firmware update | <img src="docs/images/partial.svg" alt="△" width="16" height="16"> Answered, **never applied**: Nothing is downloaded; the offered version is reported so the controller stops asking (never offered in testing) |
-| Clients as wireless clients of the AP, with signal, rates, channel width | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works |
+| Clients as wireless clients of the AP, with signal, rates, channel width, spatial streams, transmit power and retries | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works |
 | Radio and VAP stats, channel use, interference, history graphs, CPU and memory | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works. On `mwl8k` radios (Marvell 88W8366) channel use does not update: The driver only gives one sample from the last channel change. Reported by [@rbferreira](https://github.com/rbferreira) |
 | Live updates (1 s informs while the panel is open) | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works |
 | Wi-Fi experience (satisfaction) | <img src="docs/images/partial.svg" alt="△" width="16" height="16"> Partial: PHY-rate and retry sub-scores, as the firmware computes them ([details](docs/internals.md#unifi-ap-satisfaction--wifi-experience-score-how-it-is-computed)) |
 | Ethernet ports in the device panel | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works (Port Manager; an AC Pro has no port squares) |
 | Wired clients on the AP's LAN ports | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works; tested by [@dohun0310](https://github.com/dohun0310) on the Linksys LN1301, not on the OnHub; in-wall models only (U6-IW and the others with the `ACCESS_POINT_SWITCH` feature) |
-| Radios: Channel, width, transmit power, country | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works |
+| Radios: Channel, width, transmit power, country | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works. Power as Auto, High or Custom; Medium and Low are the maximum minus 6 and 12 dB (Ubiquiti does not publish its values). By [@Lukas-Heiligenbrunner](https://github.com/Lukas-Heiligenbrunner); Medium and Low were not tested on the OnHub |
 | Indoor / Outdoor | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works (Country IE environment) |
 | Minimum RSSI, load balancing (max clients) | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works |
 | WLANs: SSID, password, WPA2, WPA3, WPA2/WPA3, PMF, hidden, client isolation, U-APSD, DTIM | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works (WPA3-only untested live) |
 | WPA-Enterprise (RADIUS), Enhanced Open (OWE), WEP, private pre-shared keys | <img src="docs/images/no.svg" alt="✕" width="16" height="16"> Not built: Such a WLAN is left off, never opened with other security |
 | MAC filter (allow / deny) | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works |
 | 802.11k, 802.11v | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works; needs the full `wpad`. The neighbour list is built from the AP's own scans: Its own other-band BSSes and the same SSID on other APs of the LAN, genuine UniFi APs included |
-| 802.11r (fast transition) | <img src="docs/images/partial.svg" alt="△" width="16" height="16"> Switched on with OpenWrt's defaults, **untested live**. No key exchange with genuine UniFi APs, so a client moving between the two does a normal reconnect ([rrb-unifi](https://github.com/d-malinowski/unifi-openwrt-roaming) adds that exchange) |
+| 802.11r (fast transition) | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works, also between this AP and genuine UniFi APs, in both directions: The daemon relays the key exchange between the two and speaks UniFi's roam announcements. Tested with a WPA3 client against a UniFi Express 7 (120 to 150 ms per roam). The Wi-Fi configuration stays stock, so the Wi-Fi also starts without the daemon. Each key type (WPA2, WPA3) gets fast roaming only if the WLAN's other APs offer it too; see [internals](docs/internals.md#80211r-fast-roaming-with-unifi-aps) |
 | Band steering | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works (usteer, local mode) |
+| Roaming Assistant | <img src="docs/images/partial.svg" alt="△" width="16" height="16"> Built, **untested live**: 802.11v BSS transition requests to weak clients that support them, never a disconnect; needs the full `wpad` |
 | Minimum data rates | <img src="docs/images/partial.svg" alt="△" width="16" height="16"> Clamped: Applied per radio, only when every WLAN on that radio asks for it |
 | WLAN schedules | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works (enforced on the AP) |
 | Rate limits (user groups) | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works (tc shaping; nftables policing without tc) |
@@ -178,18 +183,19 @@ Tested live on the OnHub unless marked otherwise (see [Tested devices](#tested-d
 | VLANs (WLAN on a tagged network) | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works |
 | Block, Unblock, Reconnect | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works (immediate with `hostapd-utils`) |
 | Locate, LED on/off, Restart | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works; Locate beeps on APs with a speaker |
-| LED colour and brightness | <img src="docs/images/partial.svg" alt="△" width="16" height="16"> Built, **untested live**: Only offered when `hw_caps` is claimed (not on the AC Pro) |
+| LED colour and brightness | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works on APs with LEDs that can show it (tested on an RGB LED ring). The UniFi only offers it when the AP claims the ability: Set `hw_caps` (the AC Pro itself has none). With `led_idle 'rainbow'` the colour shows only until the rainbow takes over |
 | Disable device | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works |
 | IP settings (DHCP / static) | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works; a static address other than the current one is refused |
 | Device SSH authentication | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works (extra login, root untouched) |
-| NTP server, timezone | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works |
+| NTP server, timezone | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works. The AP's clock is also compared with the controller's and repaired when it is off |
 | Remote syslog, including UniFi's encrypted syslog | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works |
 | SNMP v1/v2c | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works; SNMPv3 not built (OpenWrt's snmpd is built without SSL) |
 | RF scan, neighbour scan, rogue AP list | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works (a spare radio is used when there is one) |
 | Mesh: Wireless uplink when the cable is out | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works; never cable and mesh at once. On `mwl8k` radios (Marvell 88W8366) the uplink passes traffic only while the 5 GHz radio also carries a WLAN. On `ath12k` (reported on a TP-Link Archer BE800, OpenWrt snapshot) the uplink joins but almost no data gets through |
 | Mesh Parent (choose the uplink AP) | <img src="docs/images/partial.svg" alt="△" width="16" height="16"> Built, **untested live** |
 | Serving mesh children, VLANs over mesh | <img src="docs/images/no.svg" alt="✕" width="16" height="16"> Not built |
-| Debug terminal, Support file | <img src="docs/images/no.svg" alt="✕" width="16" height="16"> Not built |
+| Debug terminal | <img src="docs/images/no.svg" alt="✕" width="16" height="16"> Not built, on purpose: It would be a root shell on the AP, opened through a third party's relay servers. OpenWrt has SSH and LuCI. The UniFi's window stays on "Connecting" until you close it |
+| Support file | <img src="docs/images/no.svg" alt="✕" width="16" height="16"> Not built, on purpose: The bundle is meant for Ubiquiti's support, which does not cover this AP. For a report to this project use `uow -dump`. The UniFi shows "Generating" for three minutes and then gives up (refresh the page) |
 | LLDP neighbours (what is on the other end of each cable) | <img src="docs/images/yes.svg" alt="✓" width="16" height="16"> Works with the optional `lldpd` package, which also announces the AP to the switch: The controller then takes the AP's uplink from LLDP. lldpd must listen on the Ethernet ports themselves: `uci add_list lldpd.config.interface=lan1` (your port names), `uci commit lldpd`, `/etc/init.d/lldpd restart` |
 | Discovery broadcast (the AP showing up by itself, before it has the controller's address) | <img src="docs/images/no.svg" alt="✕" width="16" height="16"> Not built: The AP is given the address. A controller that finds a device this way adopts it by logging in on its SSH port 22 as `ubnt`, which this project leaves alone |
 | DFS radar events | <img src="docs/images/no.svg" alt="✕" width="16" height="16"> Not built |
@@ -197,7 +203,7 @@ Tested live on the OnHub unless marked otherwise (see [Tested devices](#tested-d
 Technical notes for contributors are in [docs/](docs/):
 [Docs/internals.md](docs/internals.md): Protocol, config translation, stats,
 the satisfaction formula, models and profiles, LED, mesh, VLANs, guest
-portal and RF scan.
+portal, RF scan and fast roaming with UniFi APs.
 
 ## How it is tested
 
@@ -206,7 +212,7 @@ In three ways, from fast to real:
 - **Unit tests** (`go test ./...`): The protocol, the settings translation
   and readings of real devices kept as test data. A dump of your device
   (`uow -dump`, see [Contributing](#contributing)) adds it to them.
-- **Virtual machines, before a release.** The daemon runs on OpenWrt x86/64
+- **Virtual machines** (last run for v0.2.2). The daemon runs on OpenWrt x86/64
   with two simulated radios (`mac80211_hwsim`) against a real, self-hosted
   UniFi Network controller, on a network that exists only between the two
   virtual machines. On each OpenWrt version it is installed (the released
@@ -243,7 +249,7 @@ part of this repository.
   list. Install it from the package feed; check with `--simulate` before
   removing the basic one.
 - `hostapd-utils` (immediate block/unblock), `kmod-nft-bridge` (guest
-  isolation).
+  isolation), `kmod-veth` (fast roaming with UniFi APs).
 - Optional: `usteer` (band steering), `tc-tiny`, `kmod-sched-core`,
   `kmod-sched`, `kmod-ifb` (rate-limit shaping), `snmpd` (SNMP),
   `alsa-utils` (Locate beep), `lldpd` (LLDP neighbours).
@@ -256,9 +262,13 @@ part of this repository.
   the changes it would make.
 - **Automatic rollback**: Before each apply the touched UCI packages are
   backed up and an on-AP timer restores them after 5 minutes unless the
-  change is confirmed. 20 s after an apply the daemon checks that every
-  enabled radio with interfaces is up and that the controller can still
-  be reached; if not, it rolls back at once.
+  change is confirmed. 20 s after an apply (2 s after MAC list changes made
+  in hostapd) the daemon checks that every enabled radio with interfaces is
+  up and that the controller can still be reached; if not, it rolls back at
+  once.
+- **MAC lists without a Wi-Fi restart**: A plan that changes only MAC filters
+  (Lock to AP, MAC filter) is applied in the running hostapd; only the
+  clients it denies are disconnected.
 - **Never wired and mesh-uplinked at once**: The mesh watcher joins only
   after 20 s without cable link and drops the wireless uplink within a
   second of a cable coming back.
@@ -351,6 +361,10 @@ Contributors:
 - [@Kelon5212001](https://github.com/Kelon5212001): Radios that share one
   phy (`ath12k`) and the mesh watcher's cable check, tested on a TP-Link
   Archer BE800.
+- [@Lukas-Heiligenbrunner](https://github.com/Lukas-Heiligenbrunner):
+  Adoption over SSH from a controller whose inform address changed, and
+  informing to a host name the AP cannot resolve, tested on a D-Link
+  DIR-878.
 
 Similar projects:
 
@@ -360,7 +374,12 @@ Similar projects:
   with a guided installer, a LuCI app, discovery, WPA-Enterprise and more
   tested boards.
 - [rrb-unifi](https://github.com/d-malinowski/unifi-openwrt-roaming): 802.11r
-  fast roaming between OpenWrt and genuine UniFi access points.
+  fast roaming between OpenWrt and genuine UniFi access points, for an
+  OpenWrt AP that is not managed by the UniFi. It found and documented the
+  frame formats this project's own relay is built on.
+- [@rbferreira's fork](https://github.com/rbferreira/unifi-openwrt/tree/airport):
+  An Apple AirPort base station reported to the UniFi, read-only. Not
+  supported here.
 
 Details and license texts are in [NOTICE](NOTICE).
 

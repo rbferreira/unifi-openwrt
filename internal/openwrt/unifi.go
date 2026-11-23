@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"github.com/antoniocosta/unifi-openwrt/internal/models"
 	"github.com/antoniocosta/unifi-openwrt/internal/translate"
+	"net"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Fields returns the inform fields that describe the AP's radios, VAPs,
@@ -251,13 +254,14 @@ func (s *Snapshot) Fields(prev *Snapshot, info CfgInfo, caps map[string]RadioCap
 				// Its SSID is the vwire one, whose devname is the downlink VAP's.
 				vname = fmt.Sprintf("ath%d", nextAth-1)
 				m["uplink"] = vname
-				vaps = append(vaps, uplinkVAP(vname, name, r, v, s.neighbours()))
+				vaps = append(vaps, uplinkVAP(vname, name, r, v, s.Neighbours()))
 				continue
 			}
 			guest := info.GuestVAP[vname]
 			stas := []map[string]any{}
 			satReal, satAnom := 0, 0 // sum of the clients' satisfaction_real, their anomaly bits
 			for _, st := range v.Stations {
+				attMov, retMov, dropMov := staMov(st, prev.station(st.MAC))
 				row := map[string]any{
 					"mac": st.MAC, "authorized": st.Authorized,
 					"signal": st.Signal, "noise": st.Noise, "rssi": st.Signal - st.Noise,
@@ -266,7 +270,15 @@ func (s *Snapshot) Fields(prev *Snapshot, info CfgInfo, caps map[string]RadioCap
 					"tx_bytes": st.TxBytes, "rx_bytes": st.RxBytes,
 					"tx_packets": st.TxPackets, "rx_packets": st.RxPackets,
 					"tx_retries": st.TxRetries,
-					"uptime":     st.Connected, "idletime": st.Inactive / 1000,
+					// as a UAP: the controller's retry percentage comes from
+					// the *_mov fields (movement since the last inform); the
+					// UI's Wi-Fi 4/5 and 1x1/2x2 from tx_mcs and nss, and the
+					// controller derives radio_proto itself ("g" for a client
+					// without HT, "ng" with). tx_power: the radio's, half dB.
+					"wifi_tx_attempts": st.TxPackets + st.TxRetries, "wifi_tx_attempts_mov": attMov,
+					"tx_retries_mov": retMov, "wifi_tx_dropped": st.TxFailed, "wifi_tx_dropped_mov": dropMov,
+					"tx_retry_burst_count": 0, "tx_mcs": st.TxMCS, "tx_power": 2 * r.TxPower,
+					"uptime": st.Connected, "idletime": st.Inactive / 1000,
 					"is_11n": st.HT, "is_11ac": st.VHT, "is_11ax": st.HE,
 					"channel": r.Channel, "radio": r.Band, "essid": v.SSID, "bssid": v.BSSID,
 					"state": 15, "state_ht": st.HT, "state_pwrmgt": false,
@@ -278,6 +290,9 @@ func (s *Snapshot) Fields(prev *Snapshot, info CfgInfo, caps map[string]RadioCap
 				}
 				if ip, ok := s.ARP[st.MAC]; ok {
 					row["ip"] = ip
+				}
+				if n := clientNSS(st.MAC, st.NSS, s.Time); n > 0 {
+					row["nss"] = n
 				}
 				// chwidth: index into 20/40/80/160 MHz (controller: NRLJigwa,
 				// enum HT_20=0 .. HT_160=3); without it the panel guesses 20
@@ -348,6 +363,7 @@ func (s *Snapshot) Fields(prev *Snapshot, info CfgInfo, caps map[string]RadioCap
 		m["satisfaction"] = satClamp(allSat / nsta)
 	}
 	satPrune(s.Time)
+	nssPrune(s.Time)
 	m["radio_table"] = radios
 	m["radio_table_stats"] = rstats
 	m["vap_table"] = vaps
@@ -355,6 +371,69 @@ func (s *Snapshot) Fields(prev *Snapshot, info CfgInfo, caps map[string]RadioCap
 	m["user-num_sta"] = nsta
 	m["stat"] = map[string]any{"user-num_sta": nsta}
 	return m
+}
+
+// staMov: a client's tx attempts (packets + retries), retries and drops
+// since the previous reading; zeros with no previous reading or when the
+// counters went backwards (a re-association restarts them).
+func staMov(st Station, prev *Station) (attempts, retries, dropped int64) {
+	if prev == nil || st.TxPackets < prev.TxPackets || st.TxRetries < prev.TxRetries || st.TxFailed < prev.TxFailed {
+		return 0, 0, 0
+	}
+	retries = st.TxRetries - prev.TxRetries
+	return st.TxPackets - prev.TxPackets + retries, retries, st.TxFailed - prev.TxFailed
+}
+
+// A client's spatial streams show only in the rates of data frames (a
+// keep-alive at a legacy rate has none): the most seen per client, kept
+// until it has been gone for 10 minutes.
+type nssSeen struct {
+	nss  int
+	last time.Time
+}
+
+var (
+	nssMu  sync.Mutex
+	nssMem = map[string]nssSeen{}
+)
+
+// clientNSS records a reading of a client's streams (0 = none) and
+// returns the most seen, 0 = not known yet.
+func clientNSS(mac string, nss int, now time.Time) int {
+	nssMu.Lock()
+	defer nssMu.Unlock()
+	n := max(nss, nssMem[mac].nss)
+	if n > 0 {
+		nssMem[mac] = nssSeen{n, now}
+	}
+	return n
+}
+
+func nssPrune(now time.Time) {
+	nssMu.Lock()
+	defer nssMu.Unlock()
+	for m, e := range nssMem {
+		if now.Sub(e.last) > 10*time.Minute {
+			delete(nssMem, m)
+		}
+	}
+}
+
+// station: the client with this MAC on any VAP (nil if none, or s is nil).
+func (s *Snapshot) station(mac string) *Station {
+	if s == nil {
+		return nil
+	}
+	for _, r := range s.Radios {
+		for _, v := range r.VAPs {
+			for i := range v.Stations {
+				if v.Stations[i].MAC == mac {
+					return &v.Stations[i]
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // radio is the same radio in another snapshot: by wifi-device section when
@@ -572,6 +651,18 @@ func (s *Snapshot) RadioSections() map[string]string {
 	return m
 }
 
+// RadioTxPower maps the radio names we report (wifiN) to the {min, max} dBm
+// the hardware offers, for radios where it is known.
+func (s *Snapshot) RadioTxPower() map[string][2]int {
+	m := map[string][2]int{}
+	for i, r := range s.Radios {
+		if r.TxMax > 0 {
+			m[fmt.Sprintf("wifi%d", i)] = [2]int{r.TxMin, r.TxMax}
+		}
+	}
+	return m
+}
+
 // Describe summarises the AP for models.Suggest.
 func (s *Snapshot) Describe() models.AP {
 	var d models.AP
@@ -635,10 +726,10 @@ func uplinkVAP(vname, radioName string, r, v Radio, neigh map[string]string) map
 	return row
 }
 
-// neighbours: the MACs the AP knows on its LAN, from the ARP table and from
+// Neighbours: the MACs the AP knows on its LAN, from the ARP table and from
 // the br-lan forwarding database. A mesh child never talks IP to its parent
 // AP, so the parent's own MAC is often only in the forwarding database.
-func (s *Snapshot) neighbours() map[string]string {
+func (s *Snapshot) Neighbours() map[string]string {
 	out := make(map[string]string, len(s.ARP)+len(s.FDB))
 	for _, e := range s.FDB {
 		if !e.Local {
@@ -651,18 +742,40 @@ func (s *Snapshot) neighbours() map[string]string {
 	return out
 }
 
-// parentDevice finds the parent AP's own MAC among the neighbours: UniFi VAP
-// BSSIDs keep the device MAC's middle four bytes (5e:11:22:33:44:04 is a VAP of
-// 40:11:22:33:44:01). Exactly one match, or nothing.
+// bssidOfDevice reports whether bssid can be a BSSID of the device with MAC
+// mac. A device derives its BSSIDs from its MAC: b[0] is free (locally
+// administered and index bits), b[1] and b[2] are the MAC's, and of b[3],
+// b[4], b[5] at most one differs, raised by 1-15 (mod 256). As a
+// controller's vap_table lists them (addresses made up, patterns kept):
+//
+//	UAP-AC-Pro 48:a1:01:13:27:5c: 48:a1:01:14:27:5c, 52:a1:01:14:27:5c (b[3])
+//	U7 Lite    70:e5:f6:47:9c:3a: 76:e5:f6:47:9c:3b, 7a:e5:f6:47:9c:3b (b[5])
+//	OpenWrt    08:7a:6b:5c:4d:e1: 08:7a:6b:5c:4d:e2, 0a:7a:6b:5c:4d:e3 (b[5])
+func bssidOfDevice(bssid, mac string) bool {
+	b, err1 := net.ParseMAC(bssid)
+	m, err2 := net.ParseMAC(mac)
+	if err1 != nil || err2 != nil || len(b) != 6 || len(m) != 6 || b[1] != m[1] || b[2] != m[2] {
+		return false
+	}
+	raised := 0
+	for i := 3; i < 6; i++ {
+		if d := b[i] - m[i]; d > 15 {
+			return false
+		} else if d > 0 {
+			raised++
+		}
+	}
+	return raised <= 1
+}
+
+// parentDevice finds the device MAC a BSSID belongs to among the LAN
+// devices (bssidOfDevice). Exactly one match, or nothing.
 func parentDevice(bssid string, neigh map[string]string) string {
 	b := strings.ToLower(bssid)
-	if len(b) != 17 {
-		return ""
-	}
 	found := ""
 	for mac := range neigh {
 		m := strings.ToLower(mac)
-		if len(m) == 17 && m != b && m[3:14] == b[3:14] {
+		if m != b && bssidOfDevice(b, m) {
 			if found != "" && found != m {
 				return ""
 			}

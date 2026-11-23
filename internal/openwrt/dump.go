@@ -47,7 +47,7 @@ var dumpKeep = map[string][]string{
 // dumpJSON: the sections that hold JSON. One that does not parse is dropped
 // whole, because free text cannot be scrubbed safely.
 var dumpJSON = map[string]bool{"board": true, "info": true, "iface": true, "assoc": true,
-	"txpw": true, "wstatus": true, "lldp": true}
+	"hostapd": true, "txpw": true, "wstatus": true, "lldp": true}
 
 var (
 	macRE  = regexp.MustCompile(`(?i)\b[0-9a-f]{2}(:[0-9a-f]{2}){5}\b`)

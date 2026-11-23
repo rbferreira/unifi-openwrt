@@ -67,10 +67,11 @@ func TestScanTable(t *testing.T) {
 		{BSSID: "aa:bb:cc:dd:ee:01", SSID: "home", Freq: 5180, Signal: -80},
 		{BSSID: "aa:bb:cc:dd:ee:02", SSID: "other", Freq: 5200, Channel: 40, Signal: -97},
 		{BSSID: "0a:55:66:77:00:02", SSID: "home", Freq: 5180},
+		{BSSID: "52:a1:01:14:27:5c", SSID: "home", Freq: 5500, Channel: 100}, // UAP-AC-Pro
 	}}
 	rows := ScanTable(r, now, map[string]bool{"0a:55:66:77:00:02": true}, map[string]bool{"home": true},
-		map[string]string{"40:11:22:33:44:01": "192.168.1.1"})
-	if len(rows) != 2 {
+		map[string]string{"40:11:22:33:44:01": "192.168.1.1", "48:a1:01:13:27:5c": ""})
+	if len(rows) != 3 {
 		t.Fatalf("rows: %v", rows)
 	}
 	if rows[0]["is_unifi"] != true || rows[0]["serialno"] != "40:11:22:33:44:01" || rows[0]["age"] != 7 || rows[0]["rssi"] != 35 {
@@ -78,6 +79,51 @@ func TestScanTable(t *testing.T) {
 	}
 	if rows[1]["essid"] != "other" || rows[1]["is_unifi"] != false || rows[1]["rssi"] != 0 {
 		t.Errorf("neighbour: %v", rows[1])
+	}
+	if rows[2]["is_unifi"] != true || rows[2]["serialno"] != "48:a1:01:13:27:5c" {
+		t.Errorf("AC Pro sibling: %v", rows[2])
+	}
+}
+
+// BSSID/MAC pairs as a controller lists them (stat/device vap_table), with
+// made-up addresses that keep each device's pattern.
+func TestBSSIDOfDevice(t *testing.T) {
+	devices := []struct {
+		mac    string
+		bssids []string
+	}{
+		{"48:a1:01:13:27:5c", []string{"48:a1:01:14:27:5c", "48:a1:01:15:27:5c", "52:a1:01:14:27:5c"}}, // UAP-AC-Pro
+		{"94:c2:d3:2a:61:08", []string{"9a:c2:d3:2b:61:08", "9e:c2:d3:2b:61:08", "9e:c2:d3:2c:61:08"}}, // UAP-AC-Pro
+		{"94:c2:d3:2a:72:77", []string{"9a:c2:d3:2b:72:77", "9a:c2:d3:2c:72:77", "9e:c2:d3:2b:72:77"}}, // UAP-AC-Pro
+		{"70:e5:f6:47:9c:3a", []string{"76:e5:f6:47:9c:3b", "76:e5:f6:47:9c:3c", "7a:e5:f6:47:9c:3b"}}, // U7 Lite
+		{"08:7a:6b:5c:4d:e1", []string{"08:7a:6b:5c:4d:e2", "0a:7a:6b:5c:4d:e3", "0e:7a:6b:5c:4d:e2"}}, // OpenWrt
+	}
+	for i, d := range devices {
+		for _, b := range d.bssids {
+			for j, e := range devices {
+				if got := bssidOfDevice(b, e.mac); got != (i == j) {
+					t.Errorf("bssidOfDevice(%s, %s) = %v", b, e.mac, got)
+				}
+			}
+		}
+	}
+	for _, c := range []struct {
+		bssid, mac string
+		want       bool
+	}{
+		{"4a:a1:01:13:27:5c", "48:a1:01:13:27:5c", true},  // only byte 0 differs
+		{"42:11:22:33:44:01", "40:11:22:33:44:ff", true},  // +2 mod 256
+		{"48:a2:01:14:27:5c", "48:a1:01:13:27:5c", false}, // byte 1
+		{"48:a1:02:14:27:5c", "48:a1:01:13:27:5c", false}, // byte 2
+		{"48:a1:01:14:28:5c", "48:a1:01:13:27:5c", false}, // bytes 3 and 4
+		{"48:a1:01:13:28:5d", "48:a1:01:13:27:5c", false}, // bytes 4 and 5
+		{"48:a1:01:33:27:5c", "48:a1:01:13:27:5c", false}, // +0x20
+		{"48:a1:01:13:27:5b", "48:a1:01:13:27:5c", false}, // -1
+		{"x", "48:a1:01:13:27:5c", false},
+	} {
+		if got := bssidOfDevice(c.bssid, c.mac); got != c.want {
+			t.Errorf("bssidOfDevice(%s, %s) = %v, want %v", c.bssid, c.mac, got, c.want)
+		}
 	}
 }
 

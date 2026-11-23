@@ -173,3 +173,36 @@ func OwnOtherBands(s *Snapshot, ssid, iface string) []Neighbor {
 	}
 	return nb
 }
+
+// PeerFT tells which fast-roaming key types the other APs of a WLAN lack.
+type PeerFT struct {
+	LackPSK bool // an AP offers WPA2 (PSK) without FT-PSK
+	LackSAE bool // an AP offers WPA3 (SAE) without FT-SAE
+}
+
+// SiblingFT looks at the BSSes on ssid that belong to another device on the
+// LAN (as Siblings does) and reports what they do not offer. A client that
+// used a fast-roaming key type on this AP and then joined an AP without it
+// by a normal login can try a fast roam back with keys that are no longer
+// good, and is refused once. So this AP offers only what its siblings do.
+func SiblingFT(results []ScanResult, ssid string, own map[string]bool, neigh map[string]string) PeerFT {
+	var p PeerFT
+	for _, r := range results {
+		for _, b := range r.BSS {
+			if b.SSID != ssid || own[b.BSSID] || len(b.AKMs) == 0 || parentDevice(b.BSSID, neigh) == "" {
+				continue
+			}
+			has := map[string]bool{}
+			for _, a := range b.AKMs {
+				has[a] = true
+			}
+			if has["PSK"] && !has["FT/PSK"] {
+				p.LackPSK = true
+			}
+			if has["SAE"] && !has["FT/SAE"] {
+				p.LackSAE = true
+			}
+		}
+	}
+	return p
+}

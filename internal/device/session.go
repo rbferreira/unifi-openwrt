@@ -13,11 +13,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +43,9 @@ type State struct {
 	GuestToken string           `json:"guest_token,omitempty"` // portal cookie key (32 hex), sent in informs; secret
 	HashID     string           `json:"hash_id,omitempty"`     // device hash (16 hex), sent in informs; names us in encrypted syslog
 	SystemCfgN int              `json:"system_cfg_bytes"`
+	// InformAddr: the controller's IPv4 per inform host name, learned when
+	// the inform URL moved to that name; used while the AP cannot resolve it.
+	InformAddr map[string]string `json:"inform_addr,omitempty"`
 }
 
 func NewState(informURL string) State {
@@ -201,10 +206,11 @@ type Reply struct {
 	CfgVersion string  `json:"cfgversion"`
 	MgmtCfg    string  `json:"mgmt_cfg"`
 	SystemCfg  string  `json:"system_cfg"`
-	BlockedSta *string `json:"blocked_sta"` // nil = not sent; "" = no blocked clients
-	MAC        string  `json:"mac"`         // cmd kick-sta / block-sta / unblock-sta / (un)authorize-guest
-	Minutes    int     `json:"minutes"`     // authorize-guest: duration, if sent
-	End        int64   `json:"end"`         // authorize-guest: end time (unix s), if sent
+	BlockedSta *string `json:"blocked_sta"`        // nil = not sent; "" = no blocked clients
+	MAC        string  `json:"mac"`                // cmd kick-sta / block-sta / unblock-sta / (un)authorize-guest
+	Minutes    int     `json:"minutes"`            // authorize-guest: duration, if sent
+	End        int64   `json:"end"`                // authorize-guest: end time (unix s), if sent
+	ServerTime any     `json:"server_time_in_utc"` // unix ms, as a string or a number
 }
 
 // Outcome tells the loop what happened and what to do next.
@@ -215,6 +221,23 @@ type Outcome struct {
 	Changed   bool          // state changed: save it
 	Reset     bool          // controller sent setdefault (device was removed)
 	Actions   []string      // for a real AP: "reboot", "led:on", "led:off", "locate:on", "locate:off"
+	// ServerTime is the controller's clock from the reply (zero = not sent).
+	ServerTime time.Time
+}
+
+// serverTime reads server_time_in_utc (unix milliseconds).
+func serverTime(v any) time.Time {
+	var ms int64
+	switch t := v.(type) {
+	case string:
+		ms, _ = strconv.ParseInt(t, 10, 64)
+	case float64:
+		ms = int64(t)
+	}
+	if ms <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms)
 }
 
 // Handle applies a decoded reply to the session.
@@ -224,6 +247,7 @@ func (x *Session) Handle(js []byte, now time.Time) (Outcome, error) {
 		return Outcome{}, fmt.Errorf("reply is not JSON: %w", err)
 	}
 	var o Outcome
+	o.ServerTime = serverTime(r.ServerTime)
 	if r.Interval > 0 {
 		o.Interval = time.Duration(r.Interval) * time.Second
 	}
@@ -252,12 +276,15 @@ func (x *Session) Handle(js []byte, now time.Time) (Outcome, error) {
 		x.note("reply", r.Type, redactReply(js), now, &o)
 	}
 	x.noteUnread(js, r.Type, now, &o)
+	// The raw reply helps with a request the daemon does not know yet. It is
+	// logged without the values of secret-looking fields: a controller sends
+	// one-time tokens and passwords in some commands.
 	if strings.Contains(r.Cmd, "guest") {
-		o.Events = append(o.Events, "  raw reply: "+MaskHex(string(js)))
+		o.Events = append(o.Events, "  raw reply: "+redactReply(js))
 	}
 	for _, e := range o.Events {
 		if strings.Contains(e, "ignored") {
-			o.Events = append(o.Events, "  raw reply: "+MaskHex(string(js)))
+			o.Events = append(o.Events, "  raw reply: "+redactReply(js))
 			break
 		}
 	}
@@ -307,7 +334,7 @@ func (x *Session) setparam(r Reply, now time.Time, o *Outcome) {
 	if informURL != "" && informURL != x.S.InformURL {
 		if u, err := url.Parse(informURL); err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Hostname() != "" {
 			ev += fmt.Sprintf(" inform_url %s -> %s", x.S.InformURL, informURL)
-			x.S.InformURL = informURL
+			x.setInformURL(informURL, "")
 			o.Changed = true
 		} else {
 			ev += fmt.Sprintf(" (ignored a malformed inform_url %q)", informURL)
@@ -399,6 +426,42 @@ func sections(cfg string) []string {
 	return out
 }
 
+// setInformURL moves to a new inform URL. When its host is a name, the
+// controller's address is kept for it, for an AP that cannot resolve the
+// name (OpenWrt's dnsmasq drops answers with private addresses): the SSH
+// peer that sent set-adopt, else the address of the current URL, where
+// the controller has just been reached.
+func (x *Session) setInformURL(u, peer string) {
+	old := x.S.InformURL
+	x.S.InformURL = u
+	host := urlHost(u)
+	if host == "" || net.ParseIP(host) != nil {
+		return
+	}
+	addr := ""
+	// a peer that is the AP itself is console SSH forwarded through it
+	if ip := net.ParseIP(peer).To4(); ip != nil && ip.String() != x.Dev.IP {
+		addr = ip.String()
+	} else if host != urlHost(old) {
+		addr, _ = inform.InformIP(old)
+	}
+	if addr == "" {
+		return
+	}
+	if x.S.InformAddr == nil {
+		x.S.InformAddr = map[string]string{}
+	}
+	x.S.InformAddr[host] = addr
+	inform.SetInformAddr(host, addr)
+}
+
+func urlHost(u string) string {
+	if p, err := url.Parse(u); err == nil {
+		return p.Hostname()
+	}
+	return ""
+}
+
 func (x *Session) upgrade(version, url string, now time.Time, o *Outcome) {
 	// Never download or apply anything. Report the target version and fake
 	// a reboot so the controller does not loop on the upgrade.
@@ -436,7 +499,7 @@ func (x *Session) cmd(r Reply, js []byte, now time.Time, o *Outcome) {
 			x.S.Adopted = true
 		}
 		if r.URI != "" {
-			x.S.InformURL = r.URI
+			x.setInformURL(r.URI, "")
 		}
 		o.Changed = true
 		o.Immediate = true
@@ -522,6 +585,24 @@ func (x *Session) cmd(r Reply, js []byte, now time.Time, o *Outcome) {
 		o.Immediate = true
 		o.Actions = append(o.Actions, r.Cmd)
 		o.Events = append(o.Events, "cmd "+r.Cmd)
+	case "get-support-file":
+		// A bundle of logs and settings for Ubiquiti's support, uploaded to
+		// the controller. Not built on purpose: nobody supports this AP
+		// there, and `uow -dump` is the scrubbed report for this project.
+		// Nothing is sent in its place: the controller leaves "generating"
+		// only when a file arrives or after three minutes, and an upload it
+		// rejects changes nothing (tested).
+		o.Events = append(o.Events, "cmd get-support-file: not supported (README: Support file)")
+	case "build-ssh-session", "ssh-sdp-answer", "close-ssh-session":
+		// The debug terminal: a root shell over a WebRTC data channel, set up
+		// through STUN/TURN servers of a third party. Not built on purpose.
+		// The controller's window waits for the AP's connection offer;
+		// reporting the session as "down" in ssh_session_table does not end
+		// that wait (tested), so nothing is reported.
+		o.Events = append(o.Events, "cmd "+r.Cmd+": the debug terminal is not supported (README: Debug terminal)")
+	case "run":
+		// UniFi firmware runs the shell command in this request. Never here.
+		o.Events = append(o.Events, "cmd run: refused (the daemon does not run shell commands for the controller)")
 	default:
 		o.Events = append(o.Events, fmt.Sprintf("cmd %q: ignored", r.Cmd))
 		x.note("cmd", r.Cmd, redactReply(js), now, o)

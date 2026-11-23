@@ -37,6 +37,21 @@ func TestSiblings(t *testing.T) {
 	}
 }
 
+// A UAP-AC-Pro raises byte 3 of its MAC for its BSSIDs, a U7 Lite byte 5.
+func TestSiblingsGenuineUniFi(t *testing.T) {
+	res := []ScanResult{{Band: "na", BSS: []BSS{
+		{BSSID: "48:a1:01:14:27:5c", SSID: "home", Freq: 5500, Channel: 100}, // AC Pro 48:a1:01:13:27:5c
+		{BSSID: "76:e5:f6:47:9c:3b", SSID: "home", Freq: 5180, Channel: 36},  // U7 Lite 70:e5:f6:47:9c:3a
+		{BSSID: "0a:7a:6b:5c:4d:e3", SSID: "home", Freq: 5745, Channel: 149}, // own
+	}}}
+	own := map[string]bool{"0a:7a:6b:5c:4d:e3": true}
+	lan := map[string]string{"48:a1:01:13:27:5c": "", "70:e5:f6:47:9c:3a": "", "08:7a:6b:5c:4d:e1": ""}
+	nb := Siblings(res, "home", own, lan)
+	if len(nb) != 2 || nb[0].BSSID != "48:a1:01:14:27:5c" || nb[1].BSSID != "76:e5:f6:47:9c:3b" {
+		t.Errorf("siblings: %+v", nb)
+	}
+}
+
 func TestSatisfaction(t *testing.T) {
 	// sub-scores, as in UAP firmware 6.8.2
 	for _, c := range []struct{ kbps, avail, want int }{
@@ -132,5 +147,29 @@ func TestMeshAccept(t *testing.T) {
 	}
 	if MeshAccept("", "") != nil {
 		t.Fatal("auto should be empty")
+	}
+}
+
+func TestSiblingFT(t *testing.T) {
+	neigh := map[string]string{"02:11:11:11:11:00": "192.0.2.2"}
+	own := map[string]bool{"02:aa:aa:aa:aa:01": true}
+	bss := func(bssid, ssid string, akms ...string) BSS { return BSS{BSSID: bssid, SSID: ssid, AKMs: akms} }
+	for name, c := range map[string]struct {
+		b    []BSS
+		want PeerFT
+	}{
+		"sibling with FT for WPA3 only": {[]BSS{bss("02:11:11:11:11:05", "home", "PSK", "SAE", "FT/SAE")}, PeerFT{LackPSK: true}},
+		"sibling with FT for WPA2 only": {[]BSS{bss("02:11:11:11:11:05", "home", "PSK", "FT/PSK", "SAE")}, PeerFT{LackSAE: true}},
+		"sibling with both":             {[]BSS{bss("02:11:11:11:11:05", "home", "PSK", "FT/PSK", "SAE", "FT/SAE")}, PeerFT{}},
+		"WPA3-only sibling (6 GHz)":     {[]BSS{bss("02:11:11:11:11:06", "home", "SAE", "FT/SAE")}, PeerFT{}},
+		// a UAP-AC-Pro raises byte 3 of its MAC for its BSSIDs (bssidOfDevice)
+		"UAP-AC-Pro sibling, WPA2 without FT": {[]BSS{bss("06:11:11:12:11:00", "home", "PSK", "SAE", "FT/SAE")}, PeerFT{LackPSK: true}},
+		"own BSS, other SSID, a stranger's AP, no RSN": {[]BSS{
+			bss("02:aa:aa:aa:aa:01", "home", "PSK"), bss("02:11:11:11:11:05", "other", "PSK"),
+			bss("02:99:99:99:99:05", "home", "PSK"), bss("02:11:11:11:11:05", "home")}, PeerFT{}},
+	} {
+		if got := SiblingFT([]ScanResult{{BSS: c.b}}, "home", own, neigh); got != c.want {
+			t.Errorf("%s: %+v, want %+v", name, got, c.want)
+		}
 	}
 }

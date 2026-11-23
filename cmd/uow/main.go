@@ -22,6 +22,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"github.com/antoniocosta/unifi-openwrt/internal/models"
@@ -39,6 +40,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -78,6 +80,8 @@ func main() {
 	healthEvery := flag.Duration("health-every", time.Minute, "health check period")
 	sshListen := flag.String("ssh-listen", ":2222", "fake device SSH (adoption only); empty = off")
 	dump := flag.String("dump", "", "write what the daemon reads from the AP to this file, with MAC and IP addresses, SSIDs and names replaced, and exit (to attach to a bug report; \"-\" = standard output)")
+	ftOn := flag.Bool("ft-relay", true, "relay 802.11r key exchange and roam announcements between this AP and UniFi APs (daemon on the AP, kernel veth driver)")
+	ftVerbose := flag.Bool("ft-verbose", false, "log every relayed 802.11r frame and roam announcement")
 	maxErrors := flag.Int("max-errors", 0, "stop after this many bad answers in a row (0 = never: keep trying, up to a minute apart)")
 	flag.Parse()
 	if h, _, err := net.SplitHostPort(*apAddr); err == nil {
@@ -184,6 +188,9 @@ func main() {
 		st = device.NewState(*informURL)
 		st.Version = profile.Version
 	}
+	for h, ip := range st.InformAddr {
+		inform.SetInformAddr(h, ip)
+	}
 	myIP, err := localIPToward(st.InformURL)
 	if err != nil {
 		log.Fatal(err)
@@ -277,6 +284,8 @@ func main() {
 			minRSSIKick(ap.Kick, s)
 			if ap.IsAirPort() {
 				airportSteerPass(ap, s)
+			} else {
+				roamAssist(ap, s)
 			}
 			f := s.Fields(prev, info, radioCaps)
 			scans.fields(f, s, info)
@@ -285,6 +294,8 @@ func main() {
 		}
 	}
 	var adoptReqs chan device.AdoptRequest
+	var liveInformURL atomic.Value // string: x.S.InformURL for the SSH goroutine
+	liveInformURL.Store(x.S.InformURL)
 	if *sshListen != "" {
 		_, port, err := net.SplitHostPort(*sshListen)
 		if err != nil {
@@ -300,14 +311,22 @@ func main() {
 		if snap != nil {
 			allow = append(allow, snap.IP) // console SSH forwarded through the AP
 		}
+		// set-adopt and mgmt_cfg move the inform URL at runtime (and the
+		// state keeps it): the session's current inform host is allowed too,
+		// a name looked up as for inform_ip (liveInformURL is kept current
+		// by the main loop).
 		sa := &device.SSHAdopt{Listen: *sshListen, AllowFrom: allow,
+			AllowFunc: func(host string) bool {
+				ip, err := inform.InformIP(liveInformURL.Load().(string))
+				return err == nil && ip == host
+			},
 			HostKey: filepath.Join(*stateDir, "ssh_host_ed25519.pem"), Requests: make(chan device.AdoptRequest, 4)}
 		if err := sa.Start(); err != nil {
 			log.Fatalf("ssh-adopt: %v", err)
 		}
 		defer sa.Close()
 		adoptReqs = sa.Requests
-		log.Printf("ssh-adopt listening on %s (only from %v), reported as sshd_port=%d", *sshListen, allow, x.SSHPort)
+		log.Printf("ssh-adopt listening on %s (only from %v + current inform host), reported as sshd_port=%d", *sshListen, allow, x.SSHPort)
 	}
 	log.Printf("start: mac=%s ip=%s adopted=%v gcm=%v cfgversion=%s version=%s (state %s)",
 		mac, myIP, x.S.Adopted, x.S.GCM, x.S.CfgVersion, x.S.Version, map[bool]string{true: "loaded", false: "new"}[found])
@@ -338,25 +357,51 @@ func main() {
 		ledUpdate(ap, x) // flashing white until the controller answers
 		airportBlocked = x.S.Blocked
 	}
+	if ap != nil && !ap.IsAirPort() && *apply && *ftOn && *apAddr == "local" {
+		loadFTPeers(filepath.Join(*stateDir, "ft_peers.json"))
+		startFT(ap, *ftVerbose)
+		defer closeFT()
+	}
 	if ap != nil {
 		if _, err := os.Stat(filepath.Join(*stateDir, "system_cfg.txt")); err == nil {
-			syncAP(ap, filepath.Join(*stateDir, "system_cfg.txt"), *apply, api, base, x.S.InformURL)
+			syncAP(ap, filepath.Join(*stateDir, "system_cfg.txt"), *apply, api, base, x.S.InformURL, x.S.Blocked)
 		}
+		syncFT(ap)
 	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	// The inform POST dials the address inform_ip reports (for a host name
+	// the AP cannot resolve: the controller address learned at adoption).
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = inform.DialContext
+	client := &http.Client{Timeout: 10 * time.Second, Transport: tr}
 	interval := 10 * time.Second
 	errs := 0
 	lastListing := ""
 	wlanBadChecks := 0
 	var lastBan time.Time
+	var clockGuard openwrt.ClockGuard
+	var clockChecked time.Time
+	lastFT := time.Now()
 	for {
 		cfgBefore := x.S.CfgVersion
+		liveInformURL.Store(x.S.InformURL)
 		next, ok := informOnce(x, client, statePath)
 		airportBlocked = x.S.Blocked
+		if ap != nil && !ap.IsAirPort() && time.Since(lastFT) >= 15*time.Second {
+			lastFT = time.Now()
+			if updateFTPeers(scans.siblingFT()) {
+				log.Printf("FT: the other APs of a WLAN offer fast roaming for other key types than this AP: planning again")
+				syncAP(ap, filepath.Join(*stateDir, "system_cfg.txt"), *apply, api, base, x.S.InformURL, x.S.Blocked)
+			}
+			syncFT(ap)
+		}
+		if ap != nil && !ap.IsAirPort() && *apply && ok && !next.ServerTime.IsZero() && time.Since(clockChecked) >= time.Minute {
+			clockChecked = time.Now()
+			checkClock(ap, &clockGuard, next.ServerTime)
+		}
 		if ok && !ledStarted {
 			ledStarted = true
 		}
@@ -366,7 +411,7 @@ func main() {
 			}
 		}
 		if ap != nil && x.S.CfgVersion != cfgBefore {
-			syncAP(ap, filepath.Join(*stateDir, "system_cfg.txt"), *apply, api, base, x.S.InformURL)
+			syncAP(ap, filepath.Join(*stateDir, "system_cfg.txt"), *apply, api, base, x.S.InformURL, x.S.Blocked)
 			lastBan = time.Time{} // a wifi reload drops hostapd's bans
 			scans.rrmSoon()       // ... and its neighbour lists
 		}
@@ -471,6 +516,7 @@ func main() {
 			return
 		case r := <-adoptReqs:
 			o := x.ApplyAdopt(r)
+			liveInformURL.Store(x.S.InformURL)
 			for _, e := range o.Events {
 				log.Print(e)
 			}
@@ -479,6 +525,31 @@ func main() {
 			}
 			time.Sleep(time.Second) // let the console finish its SSH job first
 		case <-time.After(wait):
+		}
+	}
+}
+
+// checkClock compares the AP's clock with the controller's (from the reply
+// just received) and repairs it when they are too far apart: see
+// openwrt.ClockGuard.
+func checkClock(ap *openwrt.Client, g *openwrt.ClockGuard, server time.Time) {
+	got := time.Now()
+	apTime, err := ap.Clock()
+	if err != nil {
+		return
+	}
+	server = server.Add(time.Since(got))
+	offset := apTime.Sub(server).Round(time.Second)
+	switch g.Next(offset, got) {
+	case "restart":
+		log.Printf("CLOCK: the AP's clock differs from the controller's by %s: restarting the time service", offset)
+		if err := ap.RestartTimeService(); err != nil {
+			log.Printf("CLOCK: restarting the time service: %v", err)
+		}
+	case "set":
+		log.Printf("CLOCK: still %s off after restarting the time service (no NTP server reachable?): setting the controller's time", offset)
+		if err := ap.SetClock(server); err != nil {
+			log.Printf("CLOCK: setting the time: %v", err)
 		}
 	}
 }
@@ -587,7 +658,8 @@ func netSig(ops []translate.Op) string {
 	return strings.Join(l, "\n")
 }
 
-// reachable: a TCP connection to the controller's inform port opens.
+// reachable: a TCP connection to the controller's inform port opens (to
+// the address the inform POST uses, see inform.DialContext).
 func reachable(informURL string) error {
 	u, err := url.Parse(informURL)
 	if err != nil || u.Host == "" {
@@ -597,7 +669,9 @@ func reachable(informURL string) error {
 	if u.Port() == "" {
 		host = net.JoinHostPort(u.Hostname(), "80")
 	}
-	c, err := net.DialTimeout("tcp", host, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := inform.DialContext(ctx, "tcp", host)
 	if err != nil {
 		return err
 	}
@@ -605,11 +679,9 @@ func reachable(informURL string) error {
 }
 
 func localIPToward(informURL string) (string, error) {
-	host := strings.TrimPrefix(informURL, "http://")
-	host, _, _ = strings.Cut(host, "/")
-	h, _, err := net.SplitHostPort(host)
+	h, err := inform.InformIP(informURL)
 	if err != nil {
-		h = host
+		return "", err
 	}
 	c, err := net.Dial("udp4", net.JoinHostPort(h, "9"))
 	if err != nil {
@@ -619,11 +691,39 @@ func localIPToward(informURL string) (string, error) {
 	return c.LocalAddr().(*net.UDPAddr).IP.String(), nil
 }
 
+// aclsSynced: hostapd's MAC lists were brought in line with UCI since the
+// daemon started (see syncACLs).
+var aclsSynced bool
+
+// syncACLs brings hostapd's MAC lists in line with what UCI holds for the
+// WLAN sections of r (openwrt.Client.SyncACLs).
+func syncACLs(ap *openwrt.Client, r translate.Result, blocked []string) {
+	if len(r.ACLs) == 0 {
+		return
+	}
+	out, err := ap.Run("uci show wireless")
+	if err != nil {
+		log.Printf("MAC lists: hostapd not brought in line with the config: reading uci: %v", err)
+		aclsSynced = false
+		return
+	}
+	secs := make([]string, 0, len(r.ACLs))
+	for _, a := range r.ACLs {
+		secs = append(secs, a.Section)
+	}
+	if err := ap.SyncACLs(translate.ACLsFromUCI(translate.ParseUCI(string(out)), secs), blocked); err != nil {
+		log.Printf("MAC lists: hostapd not brought in line with the config: %v", err)
+		aclsSynced = false
+		return
+	}
+	aclsSynced = true
+}
+
 // syncAP plans the UCI changes the controller's system_cfg implies for the
 // AP and, when apply is set, applies them with an automatic rollback that is
 // cancelled only if the radios come back, the controller can still be
 // reached (a daemon on the AP) and the console stays healthy.
-func syncAP(ap *openwrt.Client, cfgPath string, apply bool, api *unifiapi.Client, base unifiapi.Health, informURL string) {
+func syncAP(ap *openwrt.Client, cfgPath string, apply bool, api *unifiapi.Client, base unifiapi.Health, informURL string, blocked []string) {
 	if ap.IsAirPort() {
 		// no uci here, and none of the other syncs (users, guest, steering,
 		// limits, mesh, SNMP, schedules) has an AirPort version
@@ -666,6 +766,9 @@ func syncAP(ap *openwrt.Client, cfgPath string, apply bool, api *unifiapi.Client
 	for _, n := range r.Notes {
 		log.Printf("  note: %s", n)
 	}
+	if _, live := openwrt.LiveACL(r.Ops, r.ACLs); live && !apply {
+		log.Printf("  note: MAC lists only: would be applied without a Wi-Fi reload")
+	}
 	if apply {
 		if err := ap.SyncSchedules(r.Schedules); err != nil {
 			log.Printf("SCHEDULES FAILED: %v", err)
@@ -673,19 +776,34 @@ func syncAP(ap *openwrt.Client, cfgPath string, apply bool, api *unifiapi.Client
 			log.Printf("SCHEDULES: %d WLAN interface(s) on the AP's own schedule", len(r.Schedules))
 		}
 	}
+	if apply && len(r.Ops) == 0 && !aclsSynced {
+		syncACLs(ap, r, blocked)
+	}
 	if !apply || len(r.Ops) == 0 {
 		return
 	}
-	id, err := ap.Apply(r.Ops, 5*time.Minute)
+	ll := openwrt.LiveLists{ACLs: r.ACLs, Keep: blocked}
+	if up, _ := ap.WifiHealthy(); !up {
+		// a radio that is down already would fail the 2 s health check of a
+		// live apply and roll the MAC change back: reload as before
+		ll = openwrt.LiveLists{}
+	}
+	id, how, err := ap.Apply(r.Ops, ll, 5*time.Minute)
 	if err != nil {
 		log.Printf("APPLY FAILED (rollback armed if it got that far): %v", err)
 		if id != "" {
 			ap.RollbackNow(id)
+			time.Sleep(10 * time.Second) // the rollback's wifi restarts BSSes
+			syncACLs(ap, r, blocked)
 		}
 		return
 	}
-	log.Printf("apply %s: committed, reloading; checking (rollback in 5 min unless confirmed)", id)
-	time.Sleep(20 * time.Second)
+	log.Print(appliedMsg(id, how))
+	wait := 20 * time.Second
+	if how == "live" {
+		wait = 2 * time.Second // no reload to wait for
+	}
+	time.Sleep(wait)
 	ok, why := ap.WifiHealthy()
 	for try := 0; !ok && try < 3; try++ { // a network reload drops the SSH session; give it time
 		time.Sleep(10 * time.Second)
@@ -723,6 +841,8 @@ func syncAP(ap *openwrt.Client, cfgPath string, apply bool, api *unifiapi.Client
 		if err := ap.RollbackNow(id); err != nil {
 			log.Printf("rollback %s: %v (the timed rollback will still fire)", id, err)
 		}
+		time.Sleep(10 * time.Second) // the rollback's wifi restarts BSSes
+		syncACLs(ap, r, blocked)
 		return
 	}
 	if err := ap.Confirm(id); err != nil {
@@ -730,6 +850,11 @@ func syncAP(ap *openwrt.Client, cfgPath string, apply bool, api *unifiapi.Client
 		return
 	}
 	log.Printf("apply %s: confirmed (%s)", id, why)
+	// A live apply changed only the sections it touched: sync the rest too
+	// while an earlier sync is still owed.
+	if how != "live" || !aclsSynced {
+		syncACLs(ap, r, blocked)
+	}
 	if r2, err := plan(ap, cfgPath); err == nil {
 		log.Printf("after apply: %d change(s) left", len(r2.Ops))
 	}
@@ -1019,6 +1144,19 @@ func syncAirPortUplink(ap *openwrt.Client, cfg translate.Cfg, apply bool) {
 	}
 }
 
+// appliedMsg is the log line once an apply is committed (how: see
+// openwrt.Client.Apply).
+func appliedMsg(id, how string) string {
+	const check = "checking (rollback in 5 min unless confirmed)"
+	if how == "live" {
+		return fmt.Sprintf("apply %s: committed, MAC lists changed in hostapd without a Wi-Fi reload; %s", id, check)
+	}
+	if why, ok := strings.CutPrefix(how, "reload: "); ok {
+		return fmt.Sprintf("apply %s: committed, live MAC list update not possible (%s): Wi-Fi reloaded; %s", id, why, check)
+	}
+	return fmt.Sprintf("apply %s: committed, reloading; %s", id, check)
+}
+
 func plan(ap *openwrt.Client, cfgPath string) (translate.Result, error) {
 	cfg, err := os.ReadFile(cfgPath)
 	if err != nil {
@@ -1029,6 +1167,8 @@ func plan(ap *openwrt.Client, cfgPath string) (translate.Result, error) {
 		return translate.Result{}, fmt.Errorf("reading the AP's uci: %w", err)
 	}
 	f := ap.Features()
+	f.FTRelay = ftRelay != nil
+	f.NoFTPSK, f.NoFTSAE = ftLimits()
 	f.APAddr = apHost
 	return translate.Plan(translate.ParseCfg(string(cfg)), translate.ParseUCI(string(out)), f), nil
 }
@@ -1733,4 +1873,39 @@ func apTarget(addr, user, key, knownHosts, platform, pwFile string) openwrt.Targ
 		log.Fatalf("-ap-platform / -ap-password-file: %v", err)
 	}
 	return t
+}
+
+// roamAssist: the WLANs' Roaming Assistant (wireless.N.btm_disassoc.*): a
+// BSS transition request to clients below the threshold for 30 s, at most
+// once a minute; never a disconnect (internal/openwrt/roam.go).
+var (
+	roam    = &openwrt.RoamAssist{}
+	roamErr string
+)
+
+func roamAssist(ap *openwrt.Client, s *openwrt.Snapshot) {
+	if s == nil {
+		return
+	}
+	b, _ := os.ReadFile(ledCfgPath) // system_cfg.txt
+	send, noWNM := roam.Step(translate.RoamAssist(translate.ParseCfg(string(b))), s, time.Now(), func(iface string) (openwrt.BSSInfo, error) {
+		bi, err := ap.BSSInfo(iface)
+		e := ""
+		if err != nil {
+			if e = err.Error(); e != roamErr {
+				log.Printf("roaming assistant: %v", err)
+			}
+		}
+		roamErr = e
+		return bi, err
+	})
+	for _, r := range noWNM {
+		log.Printf("ROAM ASSIST: %s at %d dBm < %d on %s (%s): no BSS transition support, left alone", r.MAC, r.Signal, r.Threshold, r.Iface, r.SSID)
+	}
+	for _, r := range send {
+		log.Printf("ROAM ASSIST: %s at %d dBm < %d on %s (%s): BSS transition request", r.MAC, r.Signal, r.Threshold, r.Iface, r.SSID)
+		if err := ap.BSSTransition(r); err != nil {
+			log.Printf("roaming assistant: %v", err)
+		}
+	}
 }

@@ -3,6 +3,7 @@
 package translate
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -329,5 +330,201 @@ func TestUnsupportedSecurityStaysOff(t *testing.T) {
 	// no key mgmt listed but a passphrase: still WPA2-PSK, as before
 	if enc, _ := encryption(Cfg{"aaa.1.wpa": "2", "aaa.1.wpa.psk": "x"}, "aaa.1."); enc != "psk2+ccmp" {
 		t.Errorf("no mgmt: %q", enc)
+	}
+}
+
+func TestTxPowerMode(t *testing.T) {
+	// radio0 (wifi0) currently has txpower 23 in `cur`
+	rng := map[string][2]int{"wifi0": {6, 20}}
+	for _, c := range []struct {
+		name, lines string
+		tx          map[string][2]int
+		want        string // "" = txpower deleted
+		note        bool
+	}{
+		{"medium", "mode=medium\nradio.1.txpower=auto", rng, "14", false},
+		{"low", "mode=low\nradio.1.txpower=auto", rng, "8", false},
+		{"low clamps to min", "mode=low\nradio.1.txpower=auto", map[string][2]int{"wifi0": {10, 20}}, "10", false},
+		{"clamps to 1", "mode=low\nradio.1.txpower=auto", map[string][2]int{"wifi0": {0, 8}}, "1", false},
+		{"custom", "mode=custom\nradio.1.txpower=10", rng, "10", false},
+		{"high", "mode=high\nradio.1.txpower=auto", rng, "", false},
+		{"auto", "mode=auto\nradio.1.txpower=auto", rng, "", false},
+		{"no mode, auto", "radio.1.txpower=auto", rng, "", false},
+		{"legacy numeric", "radio.1.txpower=12", rng, "12", false},
+		{"stale numeric ignored in medium", "mode=medium\nradio.1.txpower=23", rng, "14", false},
+		{"medium, unknown max: maximum + note", "mode=medium\nradio.1.txpower=auto", nil, "", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l := strings.ReplaceAll(c.lines, "mode=", "radio.1.txpower_mode=")
+			// drop the base cfg's own radio.1.txpower line
+			base := strings.Replace(cfg, "radio.1.txpower=23\n", "", 1)
+			r := Plan(ParseCfg(base+l+"\n"), ParseUCI(cur), Features{TxPower: c.tx})
+			got, deleted := "", false
+			for _, op := range r.Ops {
+				if op.Key == "wireless.radio0.txpower" {
+					got, deleted = op.Value, op.Del
+				}
+			}
+			if c.want == "" && !deleted || c.want != "" && got != c.want {
+				t.Errorf("txpower = %q (deleted %v), want %q; ops %v", got, deleted, c.want, r.Ops)
+			}
+			if c.note != strings.Contains(strings.Join(r.Notes, "\n"), "txpower") {
+				t.Errorf("note mismatch: %v", r.Notes)
+			}
+		})
+	}
+}
+
+func TestPlanFT(t *testing.T) {
+	const key = "00112233445566778899AABBCCDDEEFF"
+	ft := cfg + "aaa.1.ft.status=enabled\naaa.1.iapp_key=" + key + "\n"
+	find := func(r Result, opt string) (Op, bool) {
+		for _, op := range r.Ops {
+			if op.Key == "wireless.ap0."+opt {
+				return op, true
+			}
+		}
+		return Op{}, false
+	}
+	// with the relay: the UniFi's mobility domain, pulled keys, the wildcard
+	// key holders with the controller's key
+	r := Plan(ParseCfg(ft), ParseUCI(cur), Features{R: true, FTRelay: true})
+	for opt, want := range map[string]string{"ieee80211r": "1", "mobility_domain": MobilityDomain("home"), "pmk_r1_push": "1", "ft_psk_generate_local": "0"} {
+		if op, ok := find(r, opt); !ok || op.Value != want {
+			t.Errorf("%s = %q (found %v), want %q", opt, op.Value, ok, want)
+		}
+	}
+	lower := strings.ToLower(key)
+	for opt, want := range map[string]string{"r0kh": "ff:ff:ff:ff:ff:ff,*," + lower, "r1kh": "00:00:00:00:00:00,00:00:00:00:00:00," + lower} {
+		op, ok := find(r, opt)
+		if !ok || len(op.List) != 1 || op.List[0] != want || !op.Secret {
+			t.Errorf("%s: %+v", opt, op)
+		}
+		if strings.Contains(op.String(), lower) {
+			t.Errorf("%s: the key shows in the plan: %s", opt, op)
+		}
+	}
+	// applied: nothing left to do
+	after := cur + "wireless.ap0.ieee80211r='1'\nwireless.ap0.mobility_domain='" + MobilityDomain("home") + "'\nwireless.ap0.pmk_r1_push='1'\nwireless.ap0.ft_psk_generate_local='0'\n" +
+		"wireless.ap0.r0kh='ff:ff:ff:ff:ff:ff,*," + lower + "'\nwireless.ap0.r1kh='00:00:00:00:00:00,00:00:00:00:00:00," + lower + "'\n"
+	r = Plan(ParseCfg(ft), ParseUCI(after), Features{R: true, FTRelay: true})
+	for _, opt := range []string{"mobility_domain", "pmk_r1_push", "ft_psk_generate_local", "r0kh", "r1kh"} {
+		if op, ok := find(r, opt); ok {
+			t.Errorf("already applied, but: %s", op)
+		}
+	}
+	// the relay is gone (or fast roaming switched off): back to OpenWrt's
+	// defaults, with a note in the first case
+	for name, c := range map[string]struct {
+		cfg  string
+		f    Features
+		note bool
+	}{
+		"no relay":         {ft, Features{R: true}, true},
+		"fast roaming off": {cfg + "aaa.1.iapp_key=" + key + "\n", Features{R: true, FTRelay: true}, false},
+		"no key sent":      {cfg + "aaa.1.ft.status=enabled\n", Features{R: true, FTRelay: true}, false},
+	} {
+		r = Plan(ParseCfg(c.cfg), ParseUCI(after), c.f)
+		for _, opt := range []string{"mobility_domain", "pmk_r1_push", "ft_psk_generate_local", "r0kh", "r1kh"} {
+			if op, ok := find(r, opt); !ok || !op.Del {
+				t.Errorf("%s: %s not deleted (%+v)", name, opt, op)
+			}
+		}
+		if got := strings.Contains(strings.Join(r.Notes, "\n"), "kmod-veth"); got != c.note {
+			t.Errorf("%s: note %v, want %v: %v", name, got, c.note, r.Notes)
+		}
+	}
+	// a fresh AP without the relay: nothing about FT keys is written
+	r = Plan(ParseCfg(ft), ParseUCI(cur), Features{R: true})
+	for _, opt := range []string{"mobility_domain", "pmk_r1_push", "ft_psk_generate_local", "r0kh", "r1kh"} {
+		if op, ok := find(r, opt); ok {
+			t.Errorf("no relay, fresh AP: %s", op)
+		}
+	}
+	if MobilityDomain("example") != "56a5" { // SHA-1("salt" + "example" + 25 zero bytes) starts 56 a5
+		t.Errorf("mobility domain of example: %s", MobilityDomain("example"))
+	}
+}
+
+func TestPlanFTSiblings(t *testing.T) {
+	ft := cfg + "aaa.1.ft.status=enabled\naaa.1.iapp_key=00112233445566778899aabbccddeeff\naaa.1.wpa3.support=enabled\naaa.1.wpa3.transition=enabled\n"
+	ft = strings.Replace(ft, "aaa.1.wpa.key.1.mgmt=WPA-PSK", "aaa.1.wpa.key.1.mgmt=SAE", 1)
+	opts := func(f Features) string {
+		for _, op := range Plan(ParseCfg(ft), ParseUCI(cur), f).Ops {
+			if op.Key == "wireless.ap0.hostapd_bss_options" {
+				return strings.Join(op.List, "|")
+			}
+		}
+		return ""
+	}
+	lack := map[string]bool{"home": true}
+	for name, c := range map[string]struct {
+		f    Features
+		want string
+	}{
+		"nothing known":             {Features{R: true, FTRelay: true}, "SAE FT-SAE WPA-PSK FT-PSK"},
+		"siblings without FT-PSK":   {Features{R: true, FTRelay: true, NoFTPSK: lack}, "SAE FT-SAE WPA-PSK"},
+		"siblings without FT-SAE":   {Features{R: true, FTRelay: true, NoFTSAE: lack}, "SAE WPA-PSK FT-PSK"},
+		"another SSID's siblings":   {Features{R: true, FTRelay: true, NoFTPSK: map[string]bool{"other": true}}, "SAE FT-SAE WPA-PSK FT-PSK"},
+		"no relay: own domain, all": {Features{R: true, NoFTPSK: lack}, "SAE FT-SAE WPA-PSK FT-PSK"},
+	} {
+		if got := opts(c.f); got != "wpa_key_mgmt="+c.want {
+			t.Errorf("%s: %q, want %q", name, got, c.want)
+		}
+	}
+}
+
+// Result.ACLs holds the wanted MAC filter of every planned WLAN section,
+// changed or not (openwrt.LiveACL decides from it).
+func TestPlanACLs(t *testing.T) {
+	base := `wireless.1.devname=wifi0ap0
+wireless.1.id=x
+wireless.1.status=enabled
+wireless.1.ssid=t
+wireless.1.parent=wifi0
+wireless.1.usage=user
+wireless.1.security=none
+radio.1.phyname=wifi0
+radio.1.mode=ng
+macacl.status=enabled
+macacl.1.status=enabled
+macacl.1.devname=wifi0ap0
+macacl.1.acl.status=enabled
+`
+	cur := "wireless.radio0=wifi-device\nwireless.radio0.band='2g'\nwireless.ap0=wifi-iface\nwireless.ap0.device='radio0'\nwireless.ap0.mode='ap'\nwireless.ap0.ssid='t'\n"
+	f := Features{Phys: map[string]string{"wifi0": "2g"}}
+	for name, c := range map[string]struct {
+		cfg, cur string
+		want     []ACL
+	}{
+		"deny two": {
+			base + "macacl.1.acl.policy=deny\nmacacl.1.acl.1.status=enabled\nmacacl.1.acl.1.mac=02:00:00:00:00:09\nmacacl.1.acl.2.status=enabled\nmacacl.1.acl.2.mac=02:00:00:00:00:0A\n",
+			cur,
+			[]ACL{{Section: "ap0", Policy: "deny", MACs: []string{"02:00:00:00:00:09", "02:00:00:00:00:0a"}}},
+		},
+		"empty deny is no filter": {
+			base + "macacl.1.acl.policy=deny\n",
+			cur + "wireless.ap0.macfilter='deny'\nwireless.ap0.maclist='02:00:00:00:00:09'\n",
+			[]ACL{{Section: "ap0"}},
+		},
+		"allow, already applied": {
+			base + "macacl.1.acl.policy=allow\nmacacl.1.acl.1.status=enabled\nmacacl.1.acl.1.mac=02:00:00:00:00:09\n",
+			cur + "wireless.ap0.macfilter='allow'\nwireless.ap0.maclist='02:00:00:00:00:09'\n",
+			[]ACL{{Section: "ap0", Policy: "allow", MACs: []string{"02:00:00:00:00:09"}}},
+		},
+		"filter off": {
+			strings.Replace(base, "macacl.status=enabled", "macacl.status=disabled", 1),
+			cur,
+			[]ACL{{Section: "ap0"}},
+		},
+		"macfile section is left out": {
+			base + "macacl.1.acl.policy=deny\nmacacl.1.acl.1.status=enabled\nmacacl.1.acl.1.mac=02:00:00:00:00:09\n",
+			cur + "wireless.ap0.macfile='/etc/macs'\n",
+			nil,
+		},
+	} {
+		if got := Plan(ParseCfg(c.cfg), ParseUCI(c.cur), f).ACLs; !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: %+v, want %+v", name, got, c.want)
+		}
 	}
 }

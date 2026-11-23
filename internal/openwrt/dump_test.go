@@ -23,13 +23,15 @@ func TestScrub(t *testing.T) {
 0a1122334455 1 0 120 0
 === lldp
 not json at all, 0a:11:22:33:44:55 hunter2
+=== hostapd phy1-ap0
+{"freq": 2437, "clients": {"02:00:00:00:00:06": {"auth": true, "ht": true, "vht": false, "signature": "wifi4|probe:0,1,45"}}}
 `
 	want, err := Parse([]byte(raw), time.Unix(0, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := string(Scrub([]byte(raw)))
-	for _, bad := range []string{"HomeWiFi", "hunter2", "kitchen", `"hostname": "onhub"`, "0a1122334455", "not json"} {
+	for _, bad := range []string{"HomeWiFi", "hunter2", "kitchen", `"hostname": "onhub"`, "0a1122334455", "not json", "wifi4|probe"} {
 		if strings.Contains(out, bad) {
 			t.Errorf("dump still holds %q", bad)
 		}
@@ -57,6 +59,11 @@ not json at all, 0a:11:22:33:44:55 hunter2
 		if r.Section != w.Section || r.Band != w.Band || r.Channel != w.Channel || r.Width != w.Width || r.NSS != w.NSS ||
 			r.HWName != w.HWName || len(r.VAPs) != len(w.VAPs) || len(r.VAPs[0].Stations) != len(w.VAPs[0].Stations) {
 			t.Errorf("radio %d: %+v, want %+v", i, r, w)
+		}
+		for j, st := range r.VAPs[0].Stations {
+			if w := w.VAPs[0].Stations[j]; st.HT != w.HT || st.VHT != w.VHT {
+				t.Errorf("radio %d station %d: hostapd flags %v/%v, want %v/%v", i, j, st.HT, st.VHT, w.HT, w.VHT)
+			}
 		}
 	}
 	// the same address gets the same replacement everywhere

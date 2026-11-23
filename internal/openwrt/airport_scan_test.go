@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -79,7 +80,7 @@ func TestParseAirPortScan(t *testing.T) {
 	}
 	for i := range want {
 		want[i].AgeMs = -1
-		if got[i] != want[i] {
+		if !reflect.DeepEqual(got[i], want[i]) {
 			t.Errorf("network %d:\n got %+v\nwant %+v", i, got[i], want[i])
 		}
 	}

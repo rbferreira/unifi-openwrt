@@ -69,16 +69,19 @@ func TestOutdoor(t *testing.T) {
 func TestKeyMgmt(t *testing.T) {
 	a := "aaa.1."
 	cfg := Cfg{a + "wpa.key.1.mgmt": "SAE", a + "wpa3.transition": "enabled"}
-	if got := keyMgmt(cfg, a, "sae-mixed", false); got != "SAE WPA-PSK" {
+	if got := keyMgmt(cfg, a, "sae-mixed", false, nil); got != "SAE WPA-PSK" {
 		t.Errorf("transition: %q", got)
 	}
-	if got := keyMgmt(cfg, a, "sae-mixed", true); got != "SAE FT-SAE WPA-PSK FT-PSK" {
+	if got := keyMgmt(cfg, a, "sae-mixed", true, nil); got != "SAE FT-SAE WPA-PSK FT-PSK" {
 		t.Errorf("transition+ft: %q", got)
 	}
-	if got := keyMgmt(Cfg{a + "wpa.key.1.mgmt": "WPA-PSK"}, a, "psk2+ccmp", false); got != "WPA-PSK" {
+	if got := keyMgmt(cfg, a, "sae-mixed", true, map[string]bool{"WPA-PSK": true}); got != "SAE FT-SAE WPA-PSK" {
+		t.Errorf("transition+ft, siblings without FT-PSK: %q", got)
+	}
+	if got := keyMgmt(Cfg{a + "wpa.key.1.mgmt": "WPA-PSK"}, a, "psk2+ccmp", false, nil); got != "WPA-PSK" {
 		t.Errorf("wpa2: %q", got)
 	}
-	if got := keyMgmt(Cfg{}, a, "none", false); got != "" {
+	if got := keyMgmt(Cfg{}, a, "none", false, nil); got != "" {
 		t.Errorf("open: %q", got)
 	}
 }

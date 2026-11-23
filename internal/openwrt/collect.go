@@ -162,6 +162,7 @@ for i in $(ubus call iwinfo devices | jsonfilter -e '@.devices[*]'); do
   p=$(cat /sys/class/net/$i/phy80211/name 2>/dev/null)
   echo "=== iface $i $p"; ubus call iwinfo info "{\"device\":\"$i\"}"
   echo "=== assoc $i"; ubus call iwinfo assoclist "{\"device\":\"$i\"}"
+  echo "=== hostapd $i"; ubus call hostapd.$i get_clients 2>/dev/null
   echo "=== txpw $i"; ubus call iwinfo txpowerlist "{\"device\":\"$i\"}"
   echo "=== ant $i"; iw phy $p info | grep 'Available Antennas'
   echo "=== survey $i"; iw dev $i survey dump | grep -A6 'in use'
@@ -170,8 +171,9 @@ done
 echo "=== wstatus"; ubus call network.wireless status 2>/dev/null
 for e in $(ls /sys/class/net); do
   [ -e /sys/class/net/$e/phy80211 ] && continue
-  case $e in lo|br-*|eth*) continue;; esac
+  case $e in lo|br-*) continue;; esac
   [ -e /sys/class/net/$e/device ] || continue # virtual (miireg, tunnels, VLANs)
+  [ -d /sys/class/net/$e/dsa ] && continue    # a switch's CPU port (DSA conduit), not a jack
   echo "=== port $e"; printf 'mac=%s\nspeed=%s\nduplex=%s\noper=%s\n' $(cat /sys/class/net/$e/address) $(cat /sys/class/net/$e/speed 2>/dev/null || echo 0) $(cat /sys/class/net/$e/duplex 2>/dev/null || echo unknown) $(cat /sys/class/net/$e/operstate)
   for f in rx_bytes tx_bytes rx_packets tx_packets; do printf '%s=%s\n' $f $(cat /sys/class/net/$e/statistics/$f); done
   b=$(readlink /sys/class/net/$e/brport/bridge 2>/dev/null)
@@ -274,8 +276,12 @@ type Station struct {
 	RxPackets, TxPackets int64
 	RxRate, TxRate       int // kbit/s
 	TxRetries, TxFailed  int64
-	HT, VHT, HE          bool
-	MHz                  int
+	// HT, VHT, HE: 802.11n/ac/ax as hostapd negotiated them at association
+	// or as the current rates show them, whichever says yes
+	HT, VHT, HE bool
+	MHz         int
+	NSS         int // spatial streams of the current rates (the more of rx/tx), 0 = legacy rates
+	TxMCS       int // MCS index of the tx rate, -1 = a legacy rate
 }
 
 type Port struct {
@@ -287,6 +293,20 @@ type Port struct {
 	RxBytes, TxBytes int64
 	RxPkts, TxPkts   int64
 	BridgePort       int // port number in br-lan, 0 = not a br-lan member
+}
+
+// sortVAPs puts a radio's AP interfaces before its uplink (client)
+// interface, each group by name. The controller takes a radio's width from
+// the first vap_table row of that radio, and the uplink row carries none.
+// OpenWrt's own names sort that way by themselves (phy1-ap0 before
+// phy1-sta0); a name set by hand (option ifname) may not.
+func sortVAPs(v []Radio) {
+	sort.SliceStable(v, func(a, b int) bool {
+		if ca, cb := v[a].Mode == "Client", v[b].Mode == "Client"; ca != cb {
+			return cb
+		}
+		return v[a].Iface < v[b].Iface
+	})
 }
 
 // Collect reads the AP once.
@@ -414,7 +434,7 @@ func Parse(out []byte, now time.Time) (*Snapshot, error) {
 		radios[i].VAPs = append(radios[i].VAPs, r)
 	}
 	for i := range radios {
-		sort.Slice(radios[i].VAPs, func(a, b int) bool { return radios[i].VAPs[a].Iface < radios[i].VAPs[b].Iface })
+		sortVAPs(radios[i].VAPs)
 	}
 	s.Radios = withDevices(radios, devs)
 	if off := offDevices(secs.get("wstatus")); len(s.Radios) < len(devs)+len(off) {
@@ -643,27 +663,67 @@ func parseRadio(iface, phy string, secs *secMap) (Radio, error) {
 			Inactive   int64  `json:"inactive"`
 			Connected  int64  `json:"connected_time"`
 			Authorized bool   `json:"authorized"`
-			Rx, Tx     struct {
-				Packets, Bytes  int64
-				Rate, MHz       int
-				HT, VHT, HE     bool
-				Retries, Failed int64
-			}
+			Rx, Tx     iwRate
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(secs.get("assoc "+iface), &al); err != nil {
 		return r, fmt.Errorf("assoclist: %w", err)
 	}
+	// hostapd's flags per client, by lower-case MAC (no output for a STA
+	// interface: it has no hostapd object)
+	var hc struct {
+		Clients map[string]struct{ HT, VHT, HE bool } `json:"clients"`
+	}
+	_ = json.Unmarshal(secs.get("hostapd "+iface), &hc)
 	for _, a := range al.Results {
-		r.Stations = append(r.Stations, Station{
+		st := Station{
 			MAC: strings.ToLower(a.MAC), Signal: a.Signal, SignalAvg: a.SignalAvg, Noise: a.Noise,
 			Inactive: a.Inactive, Connected: a.Connected, Authorized: a.Authorized,
 			RxBytes: a.Rx.Bytes, TxBytes: a.Tx.Bytes, RxPackets: a.Rx.Packets, TxPackets: a.Tx.Packets,
 			RxRate: a.Rx.Rate, TxRate: a.Tx.Rate, TxRetries: a.Tx.Retries, TxFailed: a.Tx.Failed,
 			HT: a.Rx.HT || a.Tx.HT, VHT: a.Rx.VHT || a.Tx.VHT, HE: a.Rx.HE || a.Tx.HE, MHz: max(a.Rx.MHz, a.Tx.MHz), // rx alone is 20 after a legacy-rate keep-alive
-		})
+			NSS: max(a.Rx.streams(), a.Tx.streams()), TxMCS: a.Tx.mcs(),
+		}
+		// the rates show what the last frames used (a Wi-Fi 4 client's
+		// keep-alives go at legacy rates); hostapd what it associated with.
+		// Either one saying yes counts: a hostapd that does not report a
+		// flag must not take away what the rates show.
+		if c, ok := hc.Clients[st.MAC]; ok {
+			st.HT, st.VHT, st.HE = st.HT || c.HT, st.VHT || c.VHT, st.HE || c.HE
+		}
+		r.Stations = append(r.Stations, st)
 	}
 	return r, nil
+}
+
+// iwRate is the rx or tx side of an iwinfo assoclist entry: mcs is there
+// for HT and later rates, nss for VHT and later.
+type iwRate struct {
+	Packets, Bytes   int64
+	Rate, MHz        int
+	MCS, NSS         int
+	HT, VHT, HE, EHT bool
+	Retries, Failed  int64
+}
+
+// streams: the rate's spatial streams, 0 for a legacy rate. An HT MCS
+// index carries them: 0-7 is one stream, 8-15 two, up to 31.
+func (r iwRate) streams() int {
+	if r.NSS > 0 {
+		return r.NSS
+	}
+	if r.HT && r.MCS >= 0 && r.MCS < 32 {
+		return r.MCS/8 + 1
+	}
+	return 0
+}
+
+// mcs: the rate's MCS index, -1 for a legacy rate.
+func (r iwRate) mcs() int {
+	if r.HT || r.VHT || r.HE || r.EHT {
+		return r.MCS
+	}
+	return -1
 }
 
 type secMap struct {

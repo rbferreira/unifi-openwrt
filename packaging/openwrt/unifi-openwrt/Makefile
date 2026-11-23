@@ -15,7 +15,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=unifi-openwrt
-PKG_VERSION:=0.2.2
+PKG_VERSION:=0.3.0
 PKG_RELEASE:=1
 
 # PKG_SOURCE_PROTO:=git
@@ -48,6 +48,7 @@ define Package/unifi-openwrt
   # Runtime needs (besides base: uci, ubus, jsonfilter, iw, nftables):
   #  hostapd-utils   hostapd_cli for the runtime client deny list
   #  kmod-nft-bridge per-client rate limits (nftables on the bridge)
+  #  kmod-veth       802.11r key exchange with UniFi APs (the relay's bridge port)
   # A *full* hostapd/wpad (wpad-mbedtls, wpad-wolfssl, wpad-openssl, or the
   # hostapd-* equivalents) is recommended but deliberately not a dependency:
   # every variant, basic and full, provides the same virtual names (hostapd,
@@ -59,7 +60,7 @@ define Package/unifi-openwrt
   # iw and nftables are not listed because iw-full and nftables-json are
   # alternatives a Kconfig select cannot express; both come with default
   # images (tools/mkapk.sh lists them, apk resolves virtual names).
-  DEPENDS:=$(GO_ARCH_DEPENDS) +hostapd-utils +kmod-nft-bridge
+  DEPENDS:=$(GO_ARCH_DEPENDS) +hostapd-utils +kmod-nft-bridge +kmod-veth
 endef
 
 define Package/unifi-openwrt/description

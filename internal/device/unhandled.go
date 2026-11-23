@@ -207,7 +207,12 @@ func redactAny(name string, v any) any {
 var replyFields = map[string]bool{"_type": true, "interval": true, "immediate": true, "cmd": true, "key": true,
 	"uri": true, "version": true, "url": true, "cfgversion": true, "mgmt_cfg": true, "system_cfg": true,
 	"blocked_sta": true, "mac": true, "minutes": true, "end": true,
-	"server_time_in_utc": true} // the last one is not needed: the AP keeps its own time
+	"server_time_in_utc": true,
+	// sent with every cmd, and the fields of the commands refused on purpose
+	"device_id": true, "time": true, "datetime": true, "_id": true,
+	"token": true, "pinned_pubkey": true, "upload_url": true,
+	"uuid": true, "ttl": true, "stun": true, "turn": true, "username": true, "password": true,
+	"sdpanswer": true, "shellcmd": true}
 
 // mgmtKeys are the mgmt_cfg keys this daemon reads.
 var mgmtKeys = map[string]bool{"cfgversion": true, "authkey": true, "use_aes_gcm": true, "inform_url": true, "led_enabled": true}

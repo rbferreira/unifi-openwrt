@@ -38,7 +38,7 @@ apk add --allow-untrusted ./unifi-openwrt_*.apk
 ```
 
 `--allow-untrusted` is needed because the package is not signed with a key in
-`/etc/apk/keys`. apk installs the dependencies (`hostapd-utils`, `kmod-nft-bridge`,
+`/etc/apk/keys`. apk installs the dependencies (`hostapd-utils`, `kmod-nft-bridge`, `kmod-veth`,
 `iw`, `nftables`) from the OpenWrt repositories, so run `apk update` first.
 
 After installing, the service is installed but does nothing: `option enabled '0'` in
@@ -111,7 +111,7 @@ make package/unifi-openwrt/compile V=s
 
 By default the Makefile builds the source tree it sits in. Set `UOW_SRC_DIR=` to build
 another checkout. For a published feed, switch to the commented `PKG_SOURCE_*` lines.
-Its dependencies are `hostapd-utils` and `kmod-nft-bridge`. `iw` and `nftables` come
+Its dependencies are `hostapd-utils`, `kmod-nft-bridge` and `kmod-veth`. `iw` and `nftables` come
 with default images and are left out, because Kconfig cannot express "iw or iw-full".
 
 ## Tested

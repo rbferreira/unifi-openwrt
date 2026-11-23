@@ -48,7 +48,7 @@ if [ "$1" != "--no-packages" ]; then
 			opkg remove "$basic" && opkg install "$full" || { opkg install "$basic"; die "swap failed, $basic restored"; }
 		fi
 	fi
-	for p in hostapd-utils kmod-nft-bridge; do pm_has $p || pm_add $p; done
+	for p in hostapd-utils kmod-nft-bridge kmod-veth; do pm_has $p || pm_add $p; done
 	for p in usteer alsa-utils; do pm_has $p || pm_add $p || say "optional $p not installed"; done
 	/etc/init.d/usteer stop 2>/dev/null; /etc/init.d/usteer disable 2>/dev/null; true
 fi

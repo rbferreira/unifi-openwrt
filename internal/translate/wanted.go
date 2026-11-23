@@ -191,7 +191,7 @@ func Wifi(cfg Cfg, phys map[string]string) Wanted {
 			l.PMF, _ = strconv.Atoi(pmf(cfg[a+"pmf.status"], cfg[a+"pmf.mode"]))
 			// 802.11r adds FT-* key management that needs a mobility domain
 			// this model does not carry, so it is not asked for.
-			l.KeyMgmt = keyMgmt(cfg, a, enc, false)
+			l.KeyMgmt = keyMgmt(cfg, a, enc, false, nil)
 			if cfg[a+"ft.status"] == "enabled" {
 				w.Notes = append(w.Notes, fmt.Sprintf("wireless.%s (%q on %s): 802.11r requested, not translated", n, ssid, parent))
 			}

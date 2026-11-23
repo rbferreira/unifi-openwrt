@@ -19,6 +19,14 @@ const apNbrSSID = "HomeNet"
 
 var apNbrARP = map[string]string{"02:00:11:22:33:00": "192.0.2.50"}
 
+// Three UniFi devices, so that every BSSID 01..20 (hex) belongs to exactly one:
+// a BSSID is its device's MAC with one octet raised by at most 15.
+var apNbrARPMany = map[string]string{
+	"02:00:11:22:33:00": "192.0.2.50",
+	"02:00:11:22:33:0f": "192.0.2.51",
+	"02:00:11:22:33:1e": "192.0.2.52",
+}
+
 func apNbrBSS(last string, ssid string, ch, sig int) BSS {
 	freq := 2407 + 5*ch
 	if ch > 14 {
@@ -135,7 +143,7 @@ func TestAirPortNeighborsCapAndOrder(t *testing.T) {
 		// signals -30 .. -68 (i = 0 the strongest), BSSIDs 20 down to 01
 		bss = append(bss, apNbrBSS(fmt.Sprintf("%02x", 0x20-i), apNbrSSID, 1+i%11, -30-2*i))
 	}
-	got := AirPortNeighbors([]ScanResult{{Band: "ng", BSS: bss}}, apNbrSSID, nil, apNbrARP)
+	got := AirPortNeighbors([]ScanResult{{Band: "ng", BSS: bss}}, apNbrSSID, nil, apNbrARPMany)
 	if len(got) != apNbrMax {
 		t.Fatalf("%d entries, want %d", len(got), apNbrMax)
 	}
@@ -154,7 +162,7 @@ func TestAirPortNeighborsCapAndOrder(t *testing.T) {
 		}
 	}
 	// the same input, the same list
-	again := AirPortNeighbors([]ScanResult{{Band: "ng", BSS: bss}}, apNbrSSID, nil, apNbrARP)
+	again := AirPortNeighbors([]ScanResult{{Band: "ng", BSS: bss}}, apNbrSSID, nil, apNbrARPMany)
 	if !reflect.DeepEqual(got, again) {
 		t.Error("not deterministic")
 	}
@@ -163,7 +171,7 @@ func TestAirPortNeighborsCapAndOrder(t *testing.T) {
 	for i := 0; i < apNbrMax+1; i++ {
 		tie = append(tie, apNbrBSS(fmt.Sprintf("%02x", i+1), apNbrSSID, 6, -50))
 	}
-	got = AirPortNeighbors([]ScanResult{{BSS: tie}}, apNbrSSID, nil, apNbrARP)
+	got = AirPortNeighbors([]ScanResult{{BSS: tie}}, apNbrSSID, nil, apNbrARPMany)
 	if len(got) != apNbrMax || got[len(got)-1].BSSID != fmt.Sprintf("02:00:11:22:33:%02x", apNbrMax) {
 		t.Errorf("tie: %d entries, last %v", len(got), got[len(got)-1])
 	}

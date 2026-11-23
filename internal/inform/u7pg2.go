@@ -3,8 +3,10 @@
 package inform
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"sync"
@@ -136,8 +138,12 @@ func DefaultU7PG2Radios() []Radio {
 // informIP: the IPv4 address of the inform URL's host. The URL normally
 // carries a literal; a controller with "Override inform host" may send a
 // name, which is looked up (cached for five minutes; a failed lookup keeps
-// the last answer).
-func informIP(u string) (string, error) {
+// the last answer, or else takes the controller address learned for the
+// name, SetInformAddr, and is tried again after a minute).
+func informIP(u string) (string, error) { return InformIP(u) }
+
+// InformIP is informIP for other packages (the SSH adoption allow list).
+func InformIP(u string) (string, error) {
 	h := hostOf(u)
 	if ip := net.ParseIP(h); ip != nil {
 		if ip.To4() == nil {
@@ -154,17 +160,62 @@ func informIP(u string) (string, error) {
 	if e.ip != "" && time.Since(e.at) < 5*time.Minute {
 		return e.ip, nil
 	}
-	ips, err := lookupIP(h)
-	for _, ip := range ips {
-		if v4 := ip.To4(); v4 != nil {
-			ipCache[h] = ipEntry{v4.String(), time.Now()}
-			return v4.String(), nil
+	// A failed lookup is not repeated for a minute while there is an address
+	// to fall back on: with a DNS server that does not answer, every lookup
+	// takes seconds, and there are several per inform.
+	var err error
+	if e.ip == "" && learned[h] == "" || time.Since(failedAt[h]) >= time.Minute {
+		var ips []net.IP
+		ips, err = lookupIP(h)
+		for _, ip := range ips {
+			if v4 := ip.To4(); v4 != nil {
+				ipCache[h] = ipEntry{v4.String(), time.Now()}
+				delete(failedAt, h)
+				return v4.String(), nil
+			}
 		}
+		failedAt[h] = time.Now()
 	}
 	if e.ip != "" {
 		return e.ip, nil
 	}
+	if ip := learned[h]; ip != "" {
+		if !warned[h] {
+			warned[h] = true
+			dom := h
+			if _, rest, ok := strings.Cut(h, "."); ok && rest != "" {
+				dom = rest
+			}
+			log.Printf("inform host %s does not resolve on this AP (OpenWrt's dnsmasq drops answers with private addresses); using %s, the controller address learned at adoption. To fix DNS: uci add_list dhcp.@dnsmasq[0].rebind_domain='%s' && uci commit dhcp && /etc/init.d/dnsmasq restart", h, ip, dom)
+		}
+		return ip, nil
+	}
 	return "", fmt.Errorf("u7pg2: inform_url host %q has no IPv4 address (%v)", h, err)
+}
+
+// SetInformAddr gives the controller's IPv4 address for an inform host
+// name, learned when the inform URL moved to that name (device state
+// inform_addr). InformIP uses it while the name does not resolve.
+func SetInformAddr(host, ip string) {
+	ipMu.Lock()
+	defer ipMu.Unlock()
+	learned[host] = ip
+}
+
+// DialContext is the inform client's dialer: it connects to the address
+// InformIP gives for addr's host, so the POST goes where inform_ip says
+// even when the AP cannot resolve the name (URL and Host keep the name).
+func DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ip, err := InformIP(addr)
+	if err != nil {
+		return nil, err
+	}
+	var d net.Dialer
+	return d.DialContext(ctx, network, net.JoinHostPort(ip, port))
 }
 
 type ipEntry struct {
@@ -176,6 +227,9 @@ var (
 	lookupIP = net.LookupIP
 	ipMu     sync.Mutex
 	ipCache  = map[string]ipEntry{}
+	learned  = map[string]string{} // host name -> controller IPv4 (SetInformAddr)
+	warned   = map[string]bool{}   // learned address in use, logged
+	failedAt = map[string]time.Time{}
 )
 
 func hostOf(u string) string {

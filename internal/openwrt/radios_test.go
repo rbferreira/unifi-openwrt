@@ -190,3 +190,13 @@ func TestOffRadios(t *testing.T) {
 		t.Fatalf("all on: radios %d, off %v", len(s.Radios), s.OffRadios)
 	}
 }
+
+// AP interfaces come before the uplink interface whatever their names: the
+// controller reads a radio's width from its first row.
+func TestSortVAPs(t *testing.T) {
+	v := []Radio{{Iface: "phy1-sta0", Mode: "Client"}, {Iface: "wlan-main", Mode: "Master"}, {Iface: "phy1-ap0", Mode: "Master"}}
+	sortVAPs(v)
+	if got := v[0].Iface + " " + v[1].Iface + " " + v[2].Iface; got != "phy1-ap0 wlan-main phy1-sta0" {
+		t.Errorf("order: %s", got)
+	}
+}

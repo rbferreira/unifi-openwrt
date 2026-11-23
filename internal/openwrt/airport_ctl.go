@@ -27,9 +27,9 @@ func cleanMAC(m string) (string, bool) {
 	return m, macOK.MatchString(m)
 }
 
-// cleanMACs is the valid MACs of in, lower case, sorted, once each; bad counts
+// apCleanMACs is the valid MACs of in, lower case, sorted, once each; bad counts
 // the entries that were not a MAC.
-func cleanMACs(in []string) (out []string, bad int) {
+func apCleanMACs(in []string) (out []string, bad int) {
 	seen := map[string]bool{}
 	for _, m := range in {
 		c, ok := cleanMAC(m)
@@ -52,7 +52,7 @@ func aclPolicy(policy string, macs []string) (string, []string, int) {
 	if policy != "allow" && policy != "deny" {
 		return "disable", nil, 0
 	}
-	list, bad := cleanMACs(macs)
+	list, bad := apCleanMACs(macs)
 	return policy, list, bad
 }
 
@@ -77,8 +77,8 @@ func (a AirPortACL) Text() string {
 //
 // blocked entries that are not a MAC are ignored.
 func WantedACL(policy string, macs, blocked []string) AirPortACL {
-	blk, _ := cleanMACs(blocked)
-	list, _ := cleanMACs(macs)
+	blk, _ := apCleanMACs(blocked)
+	list, _ := apCleanMACs(macs)
 	if policy == "allow" {
 		drop := map[string]bool{}
 		for _, m := range blk {
@@ -95,7 +95,7 @@ func WantedACL(policy string, macs, blocked []string) AirPortACL {
 	if policy != "deny" {
 		list = nil // "disable": whatever list came along is not in force
 	}
-	all, _ := cleanMACs(append(append([]string{}, list...), blk...))
+	all, _ := apCleanMACs(append(append([]string{}, list...), blk...))
 	if len(all) == 0 {
 		return AirPortACL{Mode: "open"}
 	}
