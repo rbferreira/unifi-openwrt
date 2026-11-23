@@ -1,29 +1,26 @@
-# unifi-openwrt: OpenWrt access points as UniFi access points
+# unifi-openwrt, AirPort fork
 
-Keep your old **OpenWrt** access point useful in a **UniFi** network, long after its maker stopped
-supporting it. A small daemon on the AP speaks the UniFi inform protocol, so a UniFi controller adopts
-the AP as a UniFi model of your choice (default: UAP-AC-Pro, `U7PG2`), pushes its settings to it, and
-shows its clients, radios and stats like those of its own APs: One network, one place to manage it.
+A fork of [antoniocosta/unifi-openwrt](https://github.com/antoniocosta/unifi-openwrt), the
+project that lets a UniFi controller adopt and manage an OpenWrt access point as one of its own.
+This fork is kept in step with it (last merge: upstream 0.3.0) and adds two things:
 
-<p align="center">
-  <img src="docs/images/unifi-topology.gif" alt="An OpenWrt access point in the UniFi topology view, shown as a UniFi AP" width="329">
-</p>
+1. **An Apple AirPort as a UniFi access point.** A backend for the AirPort Time Capsule A1470
+   (802.11ac, firmware 7.9.1), which does not run OpenWrt. Not supported upstream.
+2. **Changes on the OpenWrt side that are not upstream yet**, found while testing a Linksys
+   E4200 v2 on a wired uplink.
 
-If you like this or find it useful, support the project by buying me a coffee.
+The upstream README follows [further down](#upstream-readme), unchanged. For anything that is
+not about the two points above, that is the documentation, and
+[upstream](https://github.com/antoniocosta/unifi-openwrt) is the place for issues and thanks.
 
-<a href="https://www.buymeacoffee.com/antoniocosta" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 40px !important;width: 140px !important;" ></a>
+## The AirPort backend
 
-## This fork: an Apple AirPort as a UniFi access point
-
-This is a fork of [antoniocosta/unifi-openwrt](https://github.com/antoniocosta/unifi-openwrt).
-Everything below this section is the upstream project, unchanged. The fork adds one thing: a
-backend for an **Apple AirPort Time Capsule A1470** (802.11ac, firmware 7.9.1), which does not
-run OpenWrt. The daemon runs on the base station itself (`-ap local -ap-platform airport`), the
-unit joins the network as a wireless mesh child of a UniFi AP, and the UniFi console adopts and
-configures it like one of its own.
+The daemon runs on the base station itself (`-ap local -ap-platform airport`). The unit takes
+its uplink from a cable on its WAN port or, without one, joins the site's mesh as a wireless
+child of a UniFi AP. The console adopts it and configures it like one of its own.
 
 The kit, the build and the step-by-step are in [contrib/airport](contrib/airport/README.md),
-with what was measured on the unit for each item below.
+with what was measured on the unit for each item.
 
 **What it does, from the UniFi console**
 
@@ -47,8 +44,60 @@ with what was measured on the unit for each item below.
 | Written, not tested yet | guests with a wired uplink, band steering (prefer 5 GHz), guest WLANs on the native LAN |
 
 Other AirPort models are not covered. The backend needs a Go toolchain patched for the unit's
-NetBSD 6 kernel ([contrib/airport/go](contrib/airport/go/README.md)); the OpenWrt side builds
-as upstream describes.
+NetBSD 6 kernel ([contrib/airport/go](contrib/airport/go/README.md)).
+
+## OpenWrt changes that are not upstream yet
+
+Each was seen on one device, a Linksys E4200 v2 (`mwl8k`, OpenWrt 23.05.6), and is described
+with its measurements in [docs/internals.md](docs/internals.md). Other hardware may never show
+the first, second and fourth.
+
+| Change | What was seen |
+|---|---|
+| An interface the wireless status does not name yet belongs to its radio | Booting on a cable with the wireless uplink still in the config, the daemon read the radios while they restarted, put the 5 GHz settings on the 2.4 GHz radio and switched the 5 GHz WLANs off |
+| A channel from the daemon when hostapd's automatic selection fails | With automatic channel and 40 MHz on 5 GHz, hostapd chose channel 48 every time and gave up; the WLANs stayed off |
+| A cable is the uplink only when the gateway answers through it | Any wired port with link removed the wireless uplink. With the switch port in an empty VLAN the AP stayed off the network. Now it goes back to the mesh after 30 s without the gateway, and a cable is asked by an ARP request sent out of the cable only |
+| The 802.11b rates on 2.4 GHz when the console asks for them | The console's default is a minimum of 1 Mbit/s, OpenWrt's leaves those rates out. Without them no client could join the 2.4 GHz WLANs |
+| Automatic channel on 2.4 GHz is 1, 6 or 11 | hostapd left alone also took channel 13 |
+
+## Tested with this fork
+
+| Device | Uplink | What was tested |
+|---|---|---|
+| Apple AirPort Time Capsule A1470, firmware 7.9.1 | cable and UniFi mesh | What the first table above lists, on Network 11.1.50 (UCG Ultra); rate limits and client isolation were measured before the merge of upstream 0.3.0 and not again after it. Change between cable and mesh in both directions: 28 s without an answer when the cable goes, the wireless uplink removed 11 s after it returns. A cable with link and no gateway: back on the network through the mesh after 77 s |
+| Linksys E4200 v2, OpenWrt 23.05.6 | cable and UniFi mesh | Package install, adoption, WLANs on both bands with a client, mesh uplink to a U7 Lite. Change between cable and mesh in both directions: 29 s without an answer when the cable goes, 2 s when it returns. A cable with link and no gateway: back on the network through the mesh after 46 s |
+
+## Using it
+
+- **AirPort:** follow [contrib/airport/README.md](contrib/airport/README.md).
+- **OpenWrt:** as the upstream README says, built from this branch (`airport`) instead of a
+  release: see [Building from source](#building-from-source).
+
+## Relation to upstream
+
+Fixes that are of general use go upstream as pull requests; several from this fork are merged
+there. The AirPort backend stays here: its author has no AirPort to maintain it with, and links
+to this fork instead. If this is useful to you, the project to support is
+[his](https://github.com/antoniocosta/unifi-openwrt).
+
+---
+
+<a name="upstream-readme"></a>
+
+# unifi-openwrt: OpenWrt access points as UniFi access points
+
+Keep your old **OpenWrt** access point useful in a **UniFi** network, long after its maker stopped
+supporting it. A small daemon on the AP speaks the UniFi inform protocol, so a UniFi controller adopts
+the AP as a UniFi model of your choice (default: UAP-AC-Pro, `U7PG2`), pushes its settings to it, and
+shows its clients, radios and stats like those of its own APs: One network, one place to manage it.
+
+<p align="center">
+  <img src="docs/images/unifi-topology.gif" alt="An OpenWrt access point in the UniFi topology view, shown as a UniFi AP" width="329">
+</p>
+
+If you like this or find it useful, support the project by buying me a coffee.
+
+<a href="https://www.buymeacoffee.com/antoniocosta" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 40px !important;width: 140px !important;" ></a>
 
 ## Why this repo exists
 
@@ -145,7 +194,7 @@ console, and what you tested, and it gets a row here.
 |---|---|---|---|---|---|
 | [Google OnHub (TP-Link TGR1900)](https://openwrt.org/inbox/toh/google/onhub_tp-link_tgr1900) | Qualcomm IPQ8064, Wi-Fi 5 | 25.12.6 | UAP-AC-Pro (`U7PG2`) | Network 10.6 on an Express 7 | By [@antoniocosta](https://github.com/antoniocosta): Everything under [What works](#what-works) unless marked otherwise |
 | [Linksys LN1301 (MX4300)](https://openwrt.org/toh/linksys/mx4300) | Qualcomm IPQ8174 (`ath11k`), Wi-Fi 6, one 2.4 GHz and two 5 GHz radios | 25.12.6 | U6-IW | Not reported | By [@dohun0310](https://github.com/dohun0310): Wired, as an AP and small switch. Package install and adoption, all three radios, the 160 MHz option, wired clients on the LAN ports, in-wall port numbering |
-| [Linksys E4200 v2](https://openwrt.org/toh/hwdata/linksys/linksys_e4200_v2) | Marvell Kirkwood, 2x 88W8366 (`mwl8k`), Wi-Fi 4 | 23.05.6 | UAP Pro (`U7P`) | Network 11.1.50 on a UCG Ultra | By [@rbferreira](https://github.com/rbferreira): Package install, SSH adoption with the controller on another address, the rollback timer, mesh uplink to a UniFi AP (a U7 Lite), wired uplink and the change between cable and mesh in both directions ([measured](docs/internals.md#the-watcher)) |
+| [Linksys E4200 v2](https://openwrt.org/toh/hwdata/linksys/linksys_e4200_v2) | Marvell Kirkwood, 2x 88W8366 (`mwl8k`), Wi-Fi 4 | 23.05.6 | UAP Pro (`U7P`) | Network 11.1.50 on a UCG Ultra | By [@rbferreira](https://github.com/rbferreira): Package install, SSH adoption with the controller on another address, the rollback timer, mesh uplink to a UniFi AP (a U7 Lite) |
 | [TP-Link Archer BE800](https://forum.openwrt.org/t/openwrt-for-tp-link-be800/227055) | Qualcomm IPQ9574 (`ath12k`), Wi-Fi 7, one phy for 2.4, 5 and 6 GHz | Snapshot | U7 Pro (`U7PRO`) | Not reported | By [@Kelon5212001](https://github.com/Kelon5212001): Adoption, all three radios, WLANs applied. Tested on 0.2.0 plus the fixes; confirmation on the merged code is pending. The mesh uplink joins but does not pass traffic (driver limit) |
 | [D-Link DIR-878 A1](https://openwrt.org/toh/d-link/dir-878_a1) | MediaTek MT7621, Wi-Fi 5 | 25.12.6 | UAP-AC-Pro (`U7PG2`) | Network 10.6.109 | By [@Lukas-Heiligenbrunner](https://github.com/Lukas-Heiligenbrunner): SSH adoption after the inform address changed, and "Override inform host" set to a name; the neighbour list next to two UAP-AC-Pros and a U7 Lite |
 
