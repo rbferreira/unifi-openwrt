@@ -11,11 +11,12 @@ import (
 
 // A radio on "auto" leaves the channel to hostapd (ACS). hostapd can fail at
 // it and then the radio's WLANs stay off, with netifd still reporting the
-// radio as up. Seen on mwl8k (Linksys E4200 v2), which gives no channel
-// survey: with HT40 on 5 GHz hostapd picked channel 48 every time and gave up
-// ("ACS: Could not (err: -3) select hw_mode for freq=5240 channel=48"); a
-// retry ends the same way. With a wireless uplink on the radio the channel is
-// the parent's and ACS never runs, so it shows once the AP is on a cable.
+// radio as up. Seen on mwl8k (Linksys E4200 v2): with HT40 on 5 GHz hostapd
+// picked channel 48 every time, which has no upper neighbour on that radio,
+// and gave up ("ACS: Could not (err: -3) select hw_mode for freq=5240
+// channel=48"); a retry ends the same way. With a wireless uplink on the
+// radio the channel is the parent's and ACS never runs, so it shows once the
+// AP is on a cable.
 //
 // The daemon looks for such a radio once a minute and, when it stays that
 // way, picks a channel itself (PickChannel). The plan then asks for that

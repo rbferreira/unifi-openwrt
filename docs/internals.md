@@ -229,9 +229,9 @@ that did not hold (its radios were starting): It plans again 30 s later, at
 most twice in a row.
 
 **Automatic channel that hostapd cannot choose.** `channel 'auto'` leaves
-the choice to hostapd (ACS). On `mwl8k` (Linksys E4200 v2), which gives no
-channel survey, hostapd chose channel 48 for HT40 on 5 GHz every time and
-gave up (`ACS: Could not (err: -3) select hw_mode for freq=5240 channel=48`).
+the choice to hostapd (ACS). On `mwl8k` (Linksys E4200 v2) hostapd chose
+channel 48 for HT40 on 5 GHz every time, a channel without an upper
+neighbour on that radio, and gave up (`ACS: Could not (err: -3) select hw_mode for freq=5240 channel=48`).
 The WLANs of that radio stay off, and netifd still reports the radio as up,
 so the health check passes. With a wireless uplink on the radio the channel
 is the parent's and ACS never runs: It shows once the AP is on a cable.
@@ -267,7 +267,7 @@ A requested feature the AP lacks is left off and noted ("clamped").
 | key management | `hostapd_bss_options wpa_key_mgmt=SAE WPA-PSK` (+ `FT-SAE FT-PSK` with 802.11r). OpenWrt adds `WPA-PSK-SHA256` whenever PMF is optional; a UAP does not, and some older Apple clients skip a BSS that offers it |
 | `aaa.N.ft.status`, `11k.status`, `bss_transition` | `ieee80211r`, `ieee80211k`, `bss_transition` (if the probe allows) |
 | `macacl.N.*` (keyed by VAP devname) | `macfilter allow/deny` + `maclist`; no filter = options deleted (OpenWrt rejects `macfilter disable`). A plan with nothing but MAC filter changes is applied in the running hostapd (`deny_acl`/`accept_acl`, and the `/var/run/hostapd-<if>.maclist` file) without a Wi-Fi reload: only clients the change denies are disconnected, and blocked clients stay on the deny list. A switch to or from allow, a plan with other changes, a missing `hostapd_cli`, or a list that does not read back as wanted reloads as before. After a live change UCI is committed but netifd's memory is not, and netifd restarts a BSS on a reload only if its config differs from what it last loaded. So after every apply that is not live, after a rollback, and once at start, the daemon also brings hostapd's lists in line with UCI the same way (no restart). Otherwise a later reload could leave a BSS running with older lists. |
-| `wireless.N.minrate_data`, `beacon_rate`, `mgmt_rate`, `minrate_cck_rates` | radio `supported_rates` / `basic_rate`, only when every WLAN on the radio raised its minimum (OpenWrt applies rates per radio; per-BSS beacon rates need driver support) |
+| `wireless.N.minrate_data`, `beacon_rate`, `mgmt_rate`, `minrate_cck_rates` | radio `supported_rates` / `basic_rate`, only when every WLAN on the radio raised its minimum (OpenWrt applies rates per radio; per-BSS beacon rates need driver support) A 2.4 GHz radio with a WLAN on the default rates gets `legacy_rates 1`: UniFi's default has the 802.11b rates (beacons and management frames at 1 Mbit/s), OpenWrt's leaves them out. Without them no client could join the 2.4 GHz WLANs of a Linksys E4200 v2 (`mwl8k`): a Raspberry Pi 3B+ stopped at "authenticated" in three tries of three and joined at once with them, on the same channel |
 | `wireless.N.schedule_*` | AP-side cron script `/etc/unifi-openwrt/schedule.sh` that flips the interface; the controller does not toggle scheduled WLANs itself |
 | `stamgr.N.minrssi.*` | radio `rssi_reject_assoc_rssi`; the daemon also kicks clients below the minimum for 30 s. `minrssi.rssi` may arrive as RSSI above noise (value - 95 = dBm) |
 | `stamgr.N.loadbalance.*` | `maxassoc` on the radio's UniFi interfaces |
