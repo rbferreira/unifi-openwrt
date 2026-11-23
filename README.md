@@ -64,7 +64,7 @@ the first, second and fourth.
 
 | Device | Uplink | What was tested |
 |---|---|---|
-| Apple AirPort Time Capsule A1470, firmware 7.9.1 | cable and UniFi mesh | What the first table above lists, on Network 11.1.50 (UCG Ultra); rate limits and client isolation were measured before the merge of upstream 0.3.0 and not again after it. Change between cable and mesh in both directions: 28 s without an answer when the cable goes, the wireless uplink removed 11 s after it returns. A cable with link and no gateway: back on the network through the mesh after 77 s |
+| Apple AirPort Time Capsule A1470, firmware 7.9.1 | cable and UniFi mesh | What the first table above lists, on Network 11.1.50 (UCG Ultra). Change between cable and mesh in both directions: 28 s without an answer when the cable goes, the wireless uplink removed 11 s after it returns. A cable with link and no gateway: back on the network through the mesh after 77 s |
 | Linksys E4200 v2, OpenWrt 23.05.6 | cable and UniFi mesh | Package install, adoption, WLANs on both bands with a client, mesh uplink to a U7 Lite. Change between cable and mesh in both directions: 29 s without an answer when the cable goes, 2 s when it returns. A cable with link and no gateway: back on the network through the mesh after 46 s |
 
 ## Using it
