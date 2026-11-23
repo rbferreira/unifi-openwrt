@@ -5,7 +5,7 @@
 # uplink in the LAN bridge and leaves the WLANs to the daemon. Then it watches:
 #  - a cable with link on the WAN port that reaches the gateway = wired uplink: the wireless
 #    uplink goes (no loop). A cable that leads nowhere changes nothing;
-#  - no WAN link for 20 s, or the gateway silent on the wire for 45 s: back to the wireless uplink;
+#  - no WAN link for 20 s, or the gateway silent on the wire for three looks: back to the wireless uplink;
 #  - supplicant dead or not associated for 60 s: start over;
 #  - the parent changed channel: the 5 GHz WLANs start again on it;
 #  - the daemon died: start it again.
@@ -46,13 +46,16 @@ probe() {
 	[ $r = 1 ] && [ $was = 1 ] && brconfig $BR add $IF up
 	return $r
 }
-# The bridge learned the gateway's address on the wired side: a cable started to reach it.
-gwonwire() {
-	g=$(gw); [ -n "$g" ] || return 1
-	m=$(arp -n $g 2>/dev/null | while read a b c d e; do echo $d; done)
-	case "$m" in *:*:*) ;; *) return 1;; esac
-	case "$(brconfig $BR 2>&1)" in *"$m bcmeth"*) return 0;; esac
-	return 1
+# wire N: 0 when the gateway answers an ARP request sent out of the cable only (N tries of
+# 1 s), by the daemon's binary ("uow wire-probe": a BPF device on bcmeth0 sends past the
+# bridge; the answer is listened for on the cable and on the uplink). The uplink is not
+# touched. The bridge's address table does not tell where the gateway is while both are in
+# the bridge: every broadcast arrives through both and the table keeps the later copy.
+wire() {
+	g=$(gw); [ -n "$g" ] && [ -x $M/uow ] || return 1
+	m=$(ifconfig bcmeth0 2>/dev/null | while read a b c; do case "$a" in ether|address:) echo $b;; esac; done)
+	[ -n "$m" ] || return 1
+	$M/uow wire-probe $g $1 bcmeth0@$m +$IF >/dev/null 2>&1
 }
 # The WLANs are the daemon's: with -apply it runs one hostapd per WLAN the controller asks
 # for, on VAPs wlan10..17 (2.4 GHz, bwl1) and wlan20..27 (5 GHz, bwl0), and keeps its files in
@@ -197,33 +200,32 @@ if [ -n "$(pids /usr/sbin/dhcpd)" ]; then say "dhcpd running (router mode): upli
 cp $D/wpa_supplicant $M/wpa_supplicant; chmod 755 $M/wpa_supplicant
 uow_unpack && HAVE_UOW=1 || HAVE_UOW=0
 
-lost=20; meshing=0; bad=0; upc=; nolink=1; tick=0; dead=0; gwait=0
+lost=20; meshing=0; bad=0; upc=; nolink=1; tick=0; dead=0; slow=0
 while :; do
 	if wan; then
 		lost=0
 		if [ $meshing = 1 ]; then
-			# Looked at when the cable goes in (3 tries), when the bridge sees the gateway on the
-			# wired side (every pass; 15 s after such a look found nothing), and once a minute (1 try,
-			# at most 2 s without the uplink). A wire that comes alive while the wireless uplink is
-			# up is a loop until the next look, so the bridge is read every pass.
-			tick=$((tick + 5)); n=0
-			[ $nolink = 1 ] && n=3
-			[ $n = 0 ] && [ $tick -ge $gwait ] && gwonwire && n=2
-			[ $n = 0 ] && [ $tick -ge 60 ] && n=1
-			if [ $n != 0 ]; then
-				tick=0
-				was2=$n
-				if probe $n; then leave "cable on the WAN port reaches the gateway"; meshing=0; dead=0; gwait=0; led 2
-				else
-					[ $nolink = 1 ] && say "cable on the WAN port does not reach the gateway: wireless uplink kept"
-					[ $was2 = 2 ] && gwait=15 || gwait=0
-				fi
+			# Is the cable the uplink? Asked by wire (see wire) when the cable goes in (3 tries) and
+			# every 10 s (1 try), without touching the uplink. With no answer when the cable goes
+			# in, and every 5 minutes, it is asked the older way too (probe: the uplink out of the
+			# bridge for at most 2 tries of 2 s), for a gateway that does not answer such a request.
+			# A wire that comes alive while the wireless uplink is up is a loop until the next look.
+			tick=$((tick + 5)); slow=$((slow + 5)); ok=0
+			if [ $nolink = 1 ]; then
+				tick=0; slow=0
+				{ wire 3 || probe 2; } && ok=1
+				[ $ok = 0 ] && say "cable on the WAN port does not reach the gateway: wireless uplink kept"
+			elif [ $tick -ge 10 ]; then
+				tick=0; wire 1 && ok=1
+			elif [ $slow -ge 300 ]; then
+				slow=0; probe 1 && ok=1
 			fi
+			[ $ok = 1 ] && { leave "cable on the WAN port reaches the gateway"; meshing=0; dead=0; led 2; }
 		else
-			# on the wire: a gateway that misses five looks in a row (about 45 s: a look that
-			# fails takes 2 s more) brings the wireless uplink back
+			# on the wire: a gateway that misses three looks in a row brings the wireless uplink
+			# back (five looks took 86 s when measured: a pass of this loop is not 5 s long)
 			if gwping; then dead=0; else dead=$((dead + 5)); fi
-			[ $dead -ge 25 ] && { say "cable on the WAN port, gateway silent for 45 s"; lost=20; dead=0; }
+			[ $dead -ge 15 ] && { say "cable on the WAN port, gateway silent for 3 looks"; lost=20; dead=0; }
 		fi
 		nolink=0
 	else
@@ -231,7 +233,7 @@ while :; do
 		lost=$((lost + 5))
 	fi
 	if [ $meshing = 0 ] && [ $lost -ge 20 ]; then
-		wquick=; join; meshing=1; bad=0; tick=60; [ -n "$wquick" ] && bad=60
+		wquick=; join; meshing=1; bad=0; tick=0; slow=0; [ -n "$wquick" ] && bad=60
 	fi
 	if [ $meshing = 1 ]; then
 		if alive && assoc && ! keybad; then

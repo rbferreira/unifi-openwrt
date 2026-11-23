@@ -227,11 +227,14 @@ nothing in the base station's stored configuration.
    the VLAN interfaces again on the new uplink within a minute.
 4. Every 5 s: a cable with link on the WAN port that reaches the gateway removes the wireless
    uplink (a wired uplink and a wireless one together are a loop). Link alone is not enough:
-   the gateway has to answer a ping while the wireless uplink is out of the bridge, so the
-   answer can only have come by wire. That is tried when the cable goes in, when the bridge
-   learns the gateway's address on the wired side, and once a minute (at most 2 s without the
-   uplink each time). A cable that leads nowhere leaves the wireless uplink in place. On the
-   wire, a gateway silent for 45 s brings the wireless uplink back. An uplink that is not associated for 60 s is torn
+   the gateway has to answer an ARP request that the daemon's binary sends out of the cable
+   only (`uow wire-probe`, a BPF device on `bcmeth0`), when the cable goes in and every 10 s.
+   The wireless uplink is not touched by that. With no answer when the cable goes in, and
+   every 5 minutes, the question is asked the older way too: a ping with the wireless uplink
+   out of the bridge (at most 4 s). A cable that leads nowhere leaves the wireless uplink in
+   place. The bridge's address table is not used for this: with both in the bridge it keeps
+   the gateway on the wireless side, and a cable that had come alive was noticed late. On the
+   wire, a gateway that misses three looks brings the wireless uplink back. An uplink that is not associated for 60 s is torn
    down and tried again; the daemon is started once the bridge has an address (with
    `-apply`, state directory in RAM, SSH on port 2222) and started again if it dies; the
    adoption state is copied to flash when it changes; the daemon's log is emptied when it
@@ -491,7 +494,7 @@ cable in never joined the mesh, and the 5 GHz WLANs took a channel of their own 
 the switch port disabled the unit joined the mesh 20 s later, the 5 GHz WLANs moved to the
 parent's channel and the VLAN was made again on the wireless uplink within 90 s; with the port
 enabled again the gateway test passed in 16 s, the wireless uplink went, and the VLAN was back
-on the wire 30 s after that. A wire with link whose gateway stopped answering (the switch port moved to an empty VLAN): the unit joined the mesh about two minutes later (that run counted 45 s of looks, now five looks), and with the port back it left the mesh 8 s later, 2 pings in 120 lost on the network. In that state (dead wire, mesh up) 1 ping in 120 to the unit was lost once it had settled. the parent changing
+on the wire 30 s after that. A wire with link whose gateway stopped answering (the switch port moved to an empty VLAN): the unit answered again through the mesh 77 s after it stopped (three looks at the gateway; 115 s with five), and with the port back it left the mesh 10 s later, 1 ping lost. With the port switched off and on: 28 s without an answer, then the uplink removed 11 s after the port came back, no ping lost. In that state (dead wire, mesh up) 1 ping in 120 to the unit was lost once it had settled. the parent changing
 channel; an open WLAN and a hidden one through the console; any other AirPort model; a
 parent that is not a UniFi AP.
 
